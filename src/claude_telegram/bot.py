@@ -206,33 +206,48 @@ class Bot:
                 self._user_projects[user.id] = info.work_dir or name
                 await update.message.reply_text(f"Switched to: {name} ({info.work_dir})")  # type: ignore[union-attr]
                 return
-        # Partial match
+        # Partial match in tmux sessions
         for name, info in sessions.items():
             if target.lower() in name.lower():
                 self._user_projects[user.id] = info.work_dir or name
                 await update.message.reply_text(f"Switched to: {name} ({info.work_dir})")  # type: ignore[union-attr]
                 return
-        available = list(sessions.keys())
-        await update.message.reply_text(f"Session not found: {target}\nAvailable: {available}")  # type: ignore[union-attr]
+        # Fallback: match CT_PROJECT_DIRS (SDK mode)
+        for d in self.settings.get_project_dirs():
+            if target.lower() in (d.lower(), os.path.basename(d).lower()):
+                self._user_projects[user.id] = d
+                await update.message.reply_text(f"Switched to: {os.path.basename(d)} (SDK mode)")  # type: ignore[union-attr]
+                return
+        available = list(sessions.keys()) + [os.path.basename(d) for d in self.settings.get_project_dirs()]
+        await update.message.reply_text(f"Not found: {target}\nAvailable: {available}")  # type: ignore[union-attr]
 
     async def cmd_projects(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
-        # Refresh tmux sessions
         self.claude.refresh()
         tmux_sessions = self.claude.get_all_sessions()
         current = self._get_project(user.id)
-        if not tmux_sessions:
-            await update.message.reply_text("No active tmux sessions found.\nStart Claude Code in tmux and register.")  # type: ignore[union-attr]
-            return
+        current_base = os.path.basename(current.rstrip("/")) if current else ""
         lines = []
-        for name, info in tmux_sessions.items():
-            marker = ""
-            if current and (name == os.path.basename(current.rstrip("/"))):
-                marker = " *"
-            lines.append(f"  {name}{marker} — {info.work_dir} (pane {info.pane_id})")
-        await update.message.reply_text("Sessions:\n" + "\n".join(lines))  # type: ignore[union-attr]
+        # Tmux sessions
+        if tmux_sessions:
+            lines.append("tmux:")
+            for name, info in tmux_sessions.items():
+                marker = " *" if name == current_base else ""
+                lines.append(f"  {name}{marker} — {info.pane_id}")
+        # SDK projects (from CT_PROJECT_DIRS, excluding those already in tmux)
+        tmux_dirs = {info.work_dir for info in tmux_sessions.values()}
+        sdk_dirs = [d for d in self.settings.get_project_dirs() if d not in tmux_dirs]
+        if sdk_dirs:
+            lines.append("sdk:")
+            for d in sdk_dirs:
+                name = os.path.basename(d)
+                marker = " *" if name == current_base else ""
+                lines.append(f"  {name}{marker} — {d}")
+        if not lines:
+            lines.append("No sessions or projects configured.")
+        await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user

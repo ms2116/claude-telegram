@@ -1,4 +1,4 @@
-"""Tmux-based Claude session controller — reuses proven tmux logic from legacy bot."""
+"""Hybrid Claude session controller — tmux for existing sessions, SDK for new ones."""
 
 from __future__ import annotations
 
@@ -12,6 +12,20 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
+
+try:
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        ResultMessage,
+        SystemMessage,
+        TextBlock,
+        ToolUseBlock,
+    )
+    HAS_SDK = True
+except ImportError:
+    HAS_SDK = False
 
 if TYPE_CHECKING:
     from .config import Settings
@@ -314,6 +328,19 @@ class ClaudeManager:
     def get_all_sessions(self) -> dict[str, SessionInfo]:
         return {name: s.info for name, s in self._sessions.items()}
 
+    def get_or_create_sdk_session(self, project_dir: str) -> "SDKSession":
+        """Get or create an SDK session for projects without tmux."""
+        key = f"sdk:{project_dir}"
+        if key not in self._sessions:
+            if not HAS_SDK:
+                raise RuntimeError(
+                    "claude-agent-sdk not installed. "
+                    "Install with: uv add claude-agent-sdk"
+                )
+            self._sessions[key] = SDKSession(project_dir, self.settings)  # type: ignore[assignment]
+            log.info("Created SDK session for %s", project_dir)
+        return self._sessions[key]  # type: ignore[return-value]
+
     async def execute_with_retry(
         self,
         user_id: int,
@@ -323,17 +350,120 @@ class ClaudeManager:
         system_prompt: str = "",
         max_retries: int = 2,
     ) -> SessionResult:
+        # Try tmux first
         session = self.get_session(user_id, project_dir)
         if not session:
-            # Try refreshing registry
             self.refresh()
             session = self.get_session(user_id, project_dir)
-            if not session:
-                available = list(self._sessions.keys())
-                raise RuntimeError(
-                    f"No tmux session for '{os.path.basename(project_dir)}'. "
-                    f"Available: {available or 'none'}. "
-                    f"Start Claude Code in tmux and register with register-session.sh"
-                )
 
-        return await session.execute(prompt, stream_cb)
+        if session:
+            return await session.execute(prompt, stream_cb)
+
+        # Fallback: SDK session for projects without tmux
+        sdk_session = self.get_or_create_sdk_session(project_dir)
+        return await sdk_session.execute(prompt, stream_cb)
+
+
+# ── SDKSession — fallback for projects without tmux ──
+
+class SDKSession:
+    """Spawns a new Claude Code process via claude-agent-sdk."""
+
+    def __init__(self, project_dir: str, settings: "Settings") -> None:
+        self.project_dir = project_dir
+        self.settings = settings
+        self._client: Any = None
+        self._running = False
+        self._sdk_session_id: str | None = None
+        self.info = SessionInfo(
+            project=os.path.basename(project_dir),
+            pane_id="sdk",
+            work_dir=project_dir,
+        )
+
+    async def execute(
+        self,
+        prompt: str,
+        stream_cb: StreamCallback | None = None,
+    ) -> SessionResult:
+        if not HAS_SDK:
+            raise RuntimeError("claude-agent-sdk not installed")
+
+        self._running = True
+        result = SessionResult(session_name=self.info.project)
+        text_parts: list[str] = []
+
+        try:
+            opts = ClaudeAgentOptions(
+                cwd=self.project_dir,
+                permission_mode=self.settings.permission_mode,
+                env={"CLAUDECODE": ""},
+            )
+            if self._sdk_session_id:
+                opts.resume = self._sdk_session_id
+
+            tools = self.settings.get_allowed_tools()
+            if tools:
+                opts.allowed_tools = tools
+            if self.settings.model:
+                opts.model = self.settings.model
+            if self.settings.max_turns > 0:
+                opts.max_turns = self.settings.max_turns
+
+            self._client = ClaudeSDKClient(options=opts)
+            await self._client.connect()
+            await self._client.query(prompt)
+
+            async for msg in self._client.receive_response():
+                if isinstance(msg, SystemMessage):
+                    if msg.subtype == "init" and hasattr(msg, "data"):
+                        sid = msg.data.get("session_id")
+                        if sid:
+                            self._sdk_session_id = sid
+
+                elif isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock) and block.text:
+                            text_parts.append(block.text)
+                            if stream_cb:
+                                await stream_cb(block.text, False)
+
+                elif isinstance(msg, ResultMessage):
+                    if msg.session_id:
+                        self._sdk_session_id = msg.session_id
+                    if not text_parts and msg.result:
+                        text_parts.append(msg.result)
+                        if stream_cb:
+                            await stream_cb(msg.result, False)
+
+            result.text = "".join(text_parts)
+            if stream_cb:
+                await stream_cb("", True)
+
+        except Exception:
+            log.exception("SDK error in %s", self.project_dir)
+            raise
+        finally:
+            self._running = False
+            if self._client:
+                try:
+                    await self._client.disconnect()
+                except Exception:
+                    pass
+                self._client = None
+
+        return result
+
+    async def interrupt(self) -> bool:
+        if self._client and self._running:
+            try:
+                await self._client.interrupt()
+                self._running = False
+                return True
+            except Exception:
+                log.exception("Failed to interrupt SDK session")
+        return False
+
+    @property
+    def is_running(self) -> bool:
+        return self._running

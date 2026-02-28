@@ -109,33 +109,33 @@ class Bot:
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
-        project = self._get_project(user.id)
-        proj_info = f"\nActive project: `{project}`" if project else "\nNo project configured. Set CT_PROJECT_DIRS."
+        sessions = self.claude.get_all_sessions()
+        session_list = ", ".join(sessions.keys()) if sessions else "none"
+        current = self._get_project(user.id)
+        current_name = os.path.basename(current) if current else "none"
         await update.message.reply_text(  # type: ignore[union-attr]
-            f"Claude Code Telegram Bot\n"
-            f"Send any message to interact with Claude.{proj_info}\n\n"
-            f"Commands:\n"
-            f"/help — Show commands\n"
-            f"/stop — Cancel running task\n"
-            f"/new — New session (saves memory)\n"
-            f"/project <path> — Switch project\n"
-            f"/projects — List configured projects\n"
-            f"/status — Show active sessions & cost",
+            f"Claude Code Telegram Bot\n\n"
+            f"Active: {current_name}\n"
+            f"Sessions: {session_list}\n\n"
+            f"/help — Commands\n"
+            f"/projects — Live tmux sessions\n"
+            f"/project <name> — Switch session\n"
+            f"/stop — Cancel (Ctrl+C)\n"
+            f"/new — New conversation\n"
+            f"/refresh — Reload sessions",
         )
 
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not self._is_allowed(update.effective_user.id):
             return
         await update.message.reply_text(  # type: ignore[union-attr]
-            "/start — Welcome message\n"
-            "/help — This help\n"
-            "/stop — Cancel current Claude task\n"
-            "/new — Start new session (saves memory from current)\n"
-            "/project <name|path> — Switch active project\n"
-            "/projects — List configured projects\n"
-            "/status — Active sessions, cost summary\n\n"
-            "Send any text to chat with Claude.\n"
-            "Send files/images to include them in your message.",
+            "Messages → active tmux Claude session\n\n"
+            "/projects — Live tmux sessions\n"
+            "/project <name> — Switch session\n"
+            "/stop — Send Ctrl+C\n"
+            "/new — Send /new to Claude\n"
+            "/refresh — Reload tmux sessions\n"
+            "/status — Running tasks",
         )
 
     async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -238,21 +238,30 @@ class Bot:
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
-        active = self.claude.get_active_projects(user.id)
-        active_str = ", ".join(os.path.basename(p) for p in active) if active else "none"
-        total_cost = await self.store.get_total_cost(user.id)
-        breakdown = await self.store.get_cost_breakdown(user.id)
+        self.claude.refresh()
+        sessions = self.claude.get_all_sessions()
+        running = self.claude.get_active_projects(user.id)
+        current = self._get_project(user.id)
 
-        lines = [
-            f"Active tasks: {active_str}",
-            f"Cost (30d): ${total_cost:.4f}",
-        ]
-        if breakdown:
-            lines.append("\nPer project:")
-            for row in breakdown:
-                name = os.path.basename(row["project_dir"])
-                lines.append(f"  {name}: ${row['total_cost']:.4f} ({row['queries']} queries)")
+        lines = [f"Sessions: {len(sessions)}"]
+        for name, info in sessions.items():
+            is_current = current and (name == os.path.basename(current.rstrip("/")))
+            is_running = info.project in running
+            marker = " [active]" if is_current else ""
+            status = " (running)" if is_running else ""
+            lines.append(f"  {name}{marker}{status} — {info.pane_id}")
+        if not sessions:
+            lines.append("  No tmux sessions found")
         await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
+
+    async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if not user or not self._is_allowed(user.id):
+            return
+        self.claude.refresh()
+        sessions = self.claude.get_all_sessions()
+        names = list(sessions.keys())
+        await update.message.reply_text(f"Reloaded: {names or 'no sessions found'}")  # type: ignore[union-attr]
 
     # --- Message Handler ---
 
@@ -408,6 +417,7 @@ class Bot:
         app.add_handler(CommandHandler("project", self.cmd_project))
         app.add_handler(CommandHandler("projects", self.cmd_projects))
         app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("refresh", self.cmd_refresh))
         # Messages (text, documents, photos)
         app.add_handler(
             MessageHandler(

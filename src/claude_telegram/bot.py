@@ -84,10 +84,13 @@ class Bot:
     def _get_project(self, user_id: int) -> str | None:
         if user_id in self._user_projects:
             return self._user_projects[user_id]
-        default = self.settings.get_default_project()
-        if default:
-            self._user_projects[user_id] = default
-        return default
+        # Default to first available tmux session
+        sessions = self.claude.get_all_sessions()
+        if sessions:
+            first = next(iter(sessions.values()))
+            self._user_projects[user_id] = first.work_dir or first.project
+            return self._user_projects[user_id]
+        return None
 
     async def _ensure_store_session(self, user_id: int, project_dir: str) -> int:
         if user_id in self._user_store_sessions:
@@ -182,8 +185,17 @@ class Bot:
             return
         args = (update.message.text or "").split(maxsplit=1)  # type: ignore[union-attr]
         if len(args) < 2:
-            current = self._get_project(user.id) or "none"
-            await update.message.reply_text(f"Current project: `{current}`\nUsage: /project <name|path>")  # type: ignore[union-attr]
+            current = self._get_project(user.id)
+            # Show tmux session name if possible
+            current_name = "none"
+            if current:
+                for name, info in self.claude.get_all_sessions().items():
+                    if info.work_dir == current or name == current:
+                        current_name = name
+                        break
+                else:
+                    current_name = os.path.basename(current)
+            await update.message.reply_text(f"Current: {current_name}\nUsage: /project <name>")  # type: ignore[union-attr]
             return
         target = args[1].strip()
         # Match by tmux session name or work_dir

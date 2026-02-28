@@ -342,19 +342,9 @@ class Bot:
                     except Exception:
                         pass
 
-            # Log cost
-            await self.store.log_cost(
-                user_id=user.id,
-                project_dir=project,
-                session_id=store_sid,
-                cost_usd=result.cost_usd,
-                input_tokens=result.input_tokens,
-                output_tokens=result.output_tokens,
-                duration_ms=result.duration_ms,
-            )
+            # Log usage
             await self.store.update_session(
                 store_sid,
-                sdk_session_id=result.session_id,
                 increment_messages=True,
             )
 

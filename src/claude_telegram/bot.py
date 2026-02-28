@@ -92,16 +92,9 @@ class Bot:
     async def _ensure_store_session(self, user_id: int, project_dir: str) -> int:
         if user_id in self._user_store_sessions:
             return self._user_store_sessions[user_id]
-        # Check for existing active session — restore SDK session for resume
         existing = await self.store.get_active_session(user_id, project_dir)
         if existing:
             self._user_store_sessions[user_id] = existing["id"]
-            # Restore SDK session ID so ClaudeSession can resume
-            sdk_sid = existing.get("sdk_session_id")
-            if sdk_sid:
-                session = self.claude.get_session(user_id, project_dir)
-                session._sdk_session_id = sdk_sid
-                log.info("Restored session %s for project %s", sdk_sid[:8], project_dir)
             return existing["id"]
         sid = await self.store.create_session(user_id, project_dir)
         self._user_store_sessions[user_id] = sid
@@ -170,24 +163,18 @@ class Bot:
             await self.store.end_session(self._user_store_sessions[user.id])
             del self._user_store_sessions[user.id]
 
-        # Save a summary memory via Claude
+        # In tmux mode, /new sends /new to Claude Code directly
         session = self.claude.get_session(user.id, project)
-        if session._sdk_session_id:
+        if session:
             try:
-                result = await session.execute(
-                    "Summarize our conversation in 2-3 sentences for future context. "
-                    "Focus on what was accomplished and any important decisions."
-                )
-                if result.text:
-                    await self.store.save_memory(user.id, project, result.text)
+                from .claude import send_to_tmux
+                await send_to_tmux(session.info.pane_id, "/new")
+                await update.message.reply_text("Sent /new to Claude session.")  # type: ignore[union-attr]
             except Exception:
-                log.warning("Failed to generate session summary", exc_info=True)
-
-        # Reset the Claude session
-        self.claude.reset_session(user.id, project)
-        await update.message.reply_text(  # type: ignore[union-attr]
-            "New session started. Previous context saved to memory."
-        )
+                log.warning("Failed to send /new", exc_info=True)
+                await update.message.reply_text("Failed to send /new.")  # type: ignore[union-attr]
+        else:
+            await update.message.reply_text("No tmux session found for this project.")  # type: ignore[union-attr]
 
     async def cmd_project(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -199,33 +186,41 @@ class Bot:
             await update.message.reply_text(f"Current project: `{current}`\nUsage: /project <name|path>")  # type: ignore[union-attr]
             return
         target = args[1].strip()
-        # Match by name (basename) or full path
-        for d in self.settings.get_project_dirs():
-            if target == d or target == os.path.basename(d):
-                self._user_projects[user.id] = d
-                await update.message.reply_text(f"Switched to: `{d}`")  # type: ignore[union-attr]
+        # Match by tmux session name or work_dir
+        self.claude.refresh()
+        sessions = self.claude.get_all_sessions()
+        for name, info in sessions.items():
+            if target.lower() in (name.lower(), os.path.basename(info.work_dir).lower()):
+                self._user_projects[user.id] = info.work_dir or name
+                await update.message.reply_text(f"Switched to: {name} ({info.work_dir})")  # type: ignore[union-attr]
                 return
-        # Accept arbitrary path if it exists
-        if os.path.isdir(target):
-            self._user_projects[user.id] = target
-            await update.message.reply_text(f"Switched to: `{target}`")  # type: ignore[union-attr]
-            return
-        await update.message.reply_text(f"Project not found: {target}")  # type: ignore[union-attr]
+        # Partial match
+        for name, info in sessions.items():
+            if target.lower() in name.lower():
+                self._user_projects[user.id] = info.work_dir or name
+                await update.message.reply_text(f"Switched to: {name} ({info.work_dir})")  # type: ignore[union-attr]
+                return
+        available = list(sessions.keys())
+        await update.message.reply_text(f"Session not found: {target}\nAvailable: {available}")  # type: ignore[union-attr]
 
     async def cmd_projects(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
-        dirs = self.settings.get_project_dirs()
-        if not dirs:
-            await update.message.reply_text("No projects configured. Set CT_PROJECT_DIRS.")  # type: ignore[union-attr]
-            return
+        # Refresh tmux sessions
+        self.claude.refresh()
+        tmux_sessions = self.claude.get_all_sessions()
         current = self._get_project(user.id)
+        if not tmux_sessions:
+            await update.message.reply_text("No active tmux sessions found.\nStart Claude Code in tmux and register.")  # type: ignore[union-attr]
+            return
         lines = []
-        for d in dirs:
-            marker = " (active)" if d == current else ""
-            lines.append(f"  {os.path.basename(d)} — {d}{marker}")
-        await update.message.reply_text("Projects:\n" + "\n".join(lines))  # type: ignore[union-attr]
+        for name, info in tmux_sessions.items():
+            marker = ""
+            if current and (name == os.path.basename(current.rstrip("/"))):
+                marker = " *"
+            lines.append(f"  {name}{marker} — {info.work_dir} (pane {info.pane_id})")
+        await update.message.reply_text("Sessions:\n" + "\n".join(lines))  # type: ignore[union-attr]
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user

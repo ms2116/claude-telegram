@@ -1,23 +1,17 @@
-"""Claude Agent SDK wrapper — session management with streaming and interrupt."""
+"""Tmux-based Claude session controller — reuses proven tmux logic from legacy bot."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import re
+import subprocess
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
-
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ResultMessage,
-    SystemMessage,
-    TextBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-)
 
 if TYPE_CHECKING:
     from .config import Settings
@@ -27,191 +21,298 @@ log = logging.getLogger(__name__)
 # Callback type: async fn(text_chunk, is_final)
 StreamCallback = Callable[[str, bool], Coroutine[Any, Any, None]]
 
+# ── Constants ──
+
+SESSION_DIR = Path("/tmp/claude_sessions")
+POLL_INTERVAL = 1.0      # seconds
+MIN_WAIT = 5             # let Claude start processing
+TIMEOUT = 300            # max wait
+
+# ANSI escape 코드 패턴
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\(B")
+
+_PROCESSING_PREFIXES = (
+    "·", "✻", "✽", "✢", "*", "●", "○", "◐", "◑", "◒", "◓",
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+)
+
+
+# ── Result ──
 
 @dataclass
 class SessionResult:
     text: str = ""
-    cost_usd: float | None = None
-    input_tokens: int = 0
-    output_tokens: int = 0
-    duration_ms: int = 0
-    num_turns: int = 0
-    session_id: str = ""
-    tools_used: list[str] = field(default_factory=list)
+    session_name: str = ""
 
 
-class ClaudeSession:
-    """One session per (user, project) pair. Wraps ClaudeSDKClient for statefulness."""
+# ── Low-level tmux utils ──
 
-    def __init__(
-        self,
-        project_dir: str,
-        settings: "Settings",
-        system_prompt: str = "",
-    ) -> None:
-        self.project_dir = project_dir
-        self.settings = settings
-        self.system_prompt = system_prompt
-        self._client: ClaudeSDKClient | None = None
+def strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text)
+
+
+def capture_pane(pane_id: str, lines: int = 2000) -> str:
+    r = subprocess.run(
+        ["tmux", "capture-pane", "-t", pane_id, "-p", "-S", f"-{lines}"],
+        capture_output=True, text=True, timeout=5,
+    )
+    return r.stdout
+
+
+def _is_pane_alive(pane_id: str) -> bool:
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-t", pane_id, "-p", "#{pane_id}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _is_processing_line(stripped: str) -> bool:
+    if "…" not in stripped:
+        return False
+    if len(stripped) > 80:
+        return False
+    if any(s in stripped for s in ("ctrl+o", "shift+tab", "esc to")):
+        return False
+    if stripped.startswith("⎿"):
+        return False
+    return any(stripped.startswith(p) for p in _PROCESSING_PREFIXES)
+
+
+def is_claude_idle(pane_content: str) -> bool:
+    cleaned = strip_ansi(pane_content)
+    lines = cleaned.strip().split("\n")
+    if not lines:
+        return False
+    check_lines = lines[-15:]
+    has_prompt = False
+    for line in check_lines:
+        stripped = line.strip()
+        if stripped == "❯" or stripped.startswith("❯ ") or stripped.startswith("❯\xa0"):
+            has_prompt = True
+        if stripped and all(c in "─━═" for c in stripped):
+            continue
+        if _is_processing_line(stripped):
+            return False
+    return has_prompt
+
+
+async def send_to_tmux(pane_id: str, message: str) -> None:
+    single_line = message.replace("\n", " ").strip()
+    subprocess.run(["tmux", "send-keys", "-t", pane_id, "-l", single_line], timeout=5)
+    await asyncio.sleep(0.1)
+    subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], timeout=5)
+
+
+def extract_response(before: str, after: str, user_msg: str) -> str:
+    before_clean = strip_ansi(before).strip()
+    after_clean = strip_ansi(after).strip()
+    before_lines = before_clean.split("\n")
+    after_lines = after_clean.split("\n")
+    new_content = ""
+
+    user_short = user_msg[:60].strip()
+    for i, line in enumerate(after_lines):
+        stripped = line.strip()
+        if stripped.startswith("❯") and user_short in stripped:
+            new_content = "\n".join(after_lines[i + 1:])
+            break
+        if user_short in line and i > len(after_lines) // 2:
+            new_content = "\n".join(after_lines[i + 1:])
+            break
+
+    if not new_content:
+        anchor_size = min(5, len(before_lines))
+        anchor = "\n".join(before_lines[-anchor_size:])
+        after_text = "\n".join(after_lines)
+        idx = after_text.find(anchor)
+        if idx >= 0:
+            new_content = after_text[idx + len(anchor):]
+
+    if not new_content:
+        before_set = set(before_clean.split("\n"))
+        new_content = "\n".join(l for l in after_lines if l not in before_set)
+
+    cleaned_lines = []
+    for line in new_content.split("\n"):
+        stripped = line.strip()
+        if stripped and all(c in "─━═" for c in stripped):
+            continue
+        if "shift+tab" in stripped or "esc to interrupt" in stripped:
+            continue
+        if stripped in ("❯", ">"):
+            continue
+        if _is_processing_line(stripped):
+            continue
+        cleaned_lines.append(line)
+
+    result = "\n".join(cleaned_lines).strip()
+    while "\n\n\n" in result:
+        result = result.replace("\n\n\n", "\n\n")
+    return result
+
+
+# ── Session info ──
+
+@dataclass
+class SessionInfo:
+    project: str
+    pane_id: str
+    work_dir: str
+
+
+# ── TmuxSession — one per project ──
+
+class TmuxSession:
+    def __init__(self, info: SessionInfo) -> None:
+        self.info = info
         self._running = False
-        self._sdk_session_id: str | None = None
-
-    def _build_options(self) -> ClaudeAgentOptions:
-        opts: dict[str, Any] = {
-            "cwd": self.project_dir,
-            "permission_mode": self.settings.permission_mode,
-            "env": {"CLAUDECODE": ""},  # allow running inside Claude Code session
-        }
-        tools = self.settings.get_allowed_tools()
-        if tools:
-            opts["allowed_tools"] = tools
-        if self.settings.model:
-            opts["model"] = self.settings.model
-        if self.settings.max_turns > 0:
-            opts["max_turns"] = self.settings.max_turns
-        if self.system_prompt:
-            opts["system_prompt"] = self.system_prompt
-        return ClaudeAgentOptions(**opts)
+        self._interrupted = False
 
     async def execute(
         self,
         prompt: str,
         stream_cb: StreamCallback | None = None,
     ) -> SessionResult:
-        """Send prompt and stream response. Returns final result."""
         self._running = True
-        result = SessionResult()
-        text_parts: list[str] = []
+        self._interrupted = False
+        pane_id = self.info.pane_id
+        result = SessionResult(session_name=self.info.project)
 
         try:
-            # Create new client for each query to avoid state issues
-            opts = self._build_options()
-            if self._sdk_session_id:
-                opts.resume = self._sdk_session_id
+            before = capture_pane(pane_id)
+            await send_to_tmux(pane_id, prompt)
+            log.info("Sent to %s/%s: %s", self.info.project, pane_id, prompt[:80])
 
-            self._client = ClaudeSDKClient(options=opts)
-            await self._client.connect()
-            await self._client.query(prompt)
+            # Wait for response with streaming
+            await asyncio.sleep(MIN_WAIT)
+            elapsed = MIN_WAIT
+            last_streamed = ""
 
-            async for msg in self._client.receive_response():
-                log.debug("SDK message: type=%s %r", type(msg).__name__, msg)
+            while elapsed < TIMEOUT and not self._interrupted:
+                await asyncio.sleep(POLL_INTERVAL)
+                elapsed += POLL_INTERVAL
 
-                if isinstance(msg, SystemMessage):
-                    if msg.subtype == "init" and hasattr(msg, "data"):
-                        sid = msg.data.get("session_id")
-                        if sid:
-                            self._sdk_session_id = sid
-                            result.session_id = sid
+                current = capture_pane(pane_id)
+                # Stream incremental updates
+                response_so_far = extract_response(before, current, prompt)
+                if response_so_far and response_so_far != last_streamed:
+                    if stream_cb:
+                        delta = response_so_far
+                        if last_streamed and response_so_far.startswith(last_streamed):
+                            delta = response_so_far[len(last_streamed):]
+                        if delta.strip():
+                            await stream_cb(delta, False)
+                    last_streamed = response_so_far
 
-                elif isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        log.debug("Content block: type=%s %r", type(block).__name__, block)
-                        if isinstance(block, TextBlock) and block.text:
-                            text_parts.append(block.text)
-                            if stream_cb:
-                                await stream_cb(block.text, False)
-                        elif isinstance(block, ToolUseBlock):
-                            result.tools_used.append(block.name)
+                if current != before and is_claude_idle(current):
+                    log.info("Response complete (%ds)", elapsed)
+                    break
 
-                elif isinstance(msg, ResultMessage):
-                    result.cost_usd = msg.total_cost_usd
-                    result.duration_ms = msg.duration_ms
-                    result.num_turns = msg.num_turns
-                    if msg.session_id:
-                        self._sdk_session_id = msg.session_id
-                        result.session_id = msg.session_id
-                    if msg.usage:
-                        result.input_tokens = msg.usage.get("input_tokens", 0)
-                        result.output_tokens = msg.usage.get("output_tokens", 0)
-                    # Fallback: use result text if no streaming text was captured
-                    if not text_parts and msg.result:
-                        text_parts.append(msg.result)
-                        if stream_cb:
-                            await stream_cb(msg.result, False)
+            if elapsed >= TIMEOUT:
+                log.warning("Timeout after %ds", TIMEOUT)
 
-            result.text = "".join(text_parts)
+            # Final extract
+            final = capture_pane(pane_id)
+            result.text = extract_response(before, final, prompt)
+
             if stream_cb:
-                await stream_cb("", True)  # signal completion
+                await stream_cb("", True)
 
         except Exception:
-            log.exception("Claude SDK error in project %s", self.project_dir)
+            log.exception("Error in tmux session %s", self.info.project)
             raise
         finally:
             self._running = False
-            if self._client:
-                try:
-                    await self._client.disconnect()
-                except Exception:
-                    pass
-                self._client = None
 
         return result
 
     async def interrupt(self) -> bool:
-        """Interrupt the current query. Returns True if interrupted."""
-        if self._client and self._running:
-            try:
-                await self._client.interrupt()
-                self._running = False
-                return True
-            except Exception:
-                log.exception("Failed to interrupt session")
+        if self._running:
+            self._interrupted = True
+            subprocess.run(
+                ["tmux", "send-keys", "-t", self.info.pane_id, "C-c"],
+                timeout=5,
+            )
+            log.info("Sent Ctrl+C to %s", self.info.project)
+            self._running = False
+            return True
         return False
 
     @property
     def is_running(self) -> bool:
         return self._running
 
-    def reset(self) -> None:
-        """Clear session state (for /new command)."""
-        self._sdk_session_id = None
 
+# ── ClaudeManager ──
 
 class ClaudeManager:
-    """Manages ClaudeSessions per (user_id, project_dir)."""
-
     def __init__(self, settings: "Settings") -> None:
         self.settings = settings
-        self._sessions: dict[str, ClaudeSession] = {}
+        self._sessions: dict[str, TmuxSession] = {}  # project_name -> TmuxSession
 
-    def _key(self, user_id: int, project_dir: str) -> str:
-        return f"{user_id}:{project_dir}"
+    def load_sessions(self) -> None:
+        """Load sessions from /tmp/claude_sessions/ registry."""
+        self._sessions.clear()
 
-    def get_session(
-        self,
-        user_id: int,
-        project_dir: str,
-        system_prompt: str = "",
-    ) -> ClaudeSession:
-        key = self._key(user_id, project_dir)
-        if key not in self._sessions:
-            self._sessions[key] = ClaudeSession(
-                project_dir=project_dir,
-                settings=self.settings,
-                system_prompt=system_prompt,
-            )
-        return self._sessions[key]
+        if not SESSION_DIR.exists():
+            log.warning("Session dir %s not found", SESSION_DIR)
+            return
 
-    def reset_session(self, user_id: int, project_dir: str) -> None:
-        key = self._key(user_id, project_dir)
-        session = self._sessions.get(key)
-        if session:
-            session.reset()
+        for f in SESSION_DIR.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                project = data["project"]
+                pane_id = data["pane_id"]
+
+                if not _is_pane_alive(pane_id):
+                    log.info("Session %s pane %s dead — skipping", project, pane_id)
+                    f.unlink(missing_ok=True)
+                    continue
+
+                info = SessionInfo(
+                    project=project,
+                    pane_id=pane_id,
+                    work_dir=data.get("work_dir", ""),
+                )
+                self._sessions[project] = TmuxSession(info)
+                log.info("Loaded session: %s (pane %s, dir %s)", project, pane_id, info.work_dir)
+            except Exception as e:
+                log.warning("Failed to parse session file %s: %s", f, e)
+
+    def refresh(self) -> None:
+        """Reload sessions from registry."""
+        self.load_sessions()
+
+    def get_session(self, user_id: int, project_dir: str, **_: Any) -> TmuxSession | None:
+        # Try exact project name match
+        project_name = os.path.basename(project_dir.rstrip("/"))
+        if project_name in self._sessions:
+            return self._sessions[project_name]
+        # Try by work_dir match
+        for s in self._sessions.values():
+            if s.info.work_dir.rstrip("/") == project_dir.rstrip("/"):
+                return s
+        # Try partial name match
+        for name, s in self._sessions.items():
+            if project_name.lower() in name.lower() or name.lower() in project_name.lower():
+                return s
+        return None
 
     async def interrupt_session(self, user_id: int, project_dir: str) -> bool:
-        key = self._key(user_id, project_dir)
-        session = self._sessions.get(key)
+        session = self.get_session(user_id, project_dir)
         if session:
             return await session.interrupt()
         return False
 
     def get_active_projects(self, user_id: int) -> list[str]:
-        prefix = f"{user_id}:"
-        return [
-            k.split(":", 1)[1]
-            for k, s in self._sessions.items()
-            if k.startswith(prefix) and s.is_running
-        ]
+        return [s.info.project for s in self._sessions.values() if s.is_running]
+
+    def get_all_sessions(self) -> dict[str, SessionInfo]:
+        return {name: s.info for name, s in self._sessions.items()}
 
     async def execute_with_retry(
         self,
@@ -220,33 +321,19 @@ class ClaudeManager:
         prompt: str,
         stream_cb: StreamCallback | None = None,
         system_prompt: str = "",
-        max_retries: int = 3,
+        max_retries: int = 2,
     ) -> SessionResult:
-        """Execute with exponential backoff on transient errors."""
-        session = self.get_session(user_id, project_dir, system_prompt)
-        last_error: Exception | None = None
-
-        for attempt in range(max_retries):
-            try:
-                return await session.execute(prompt, stream_cb)
-            except Exception as e:
-                last_error = e
-                err_str = str(e).lower()
-                # Only retry on transient errors
-                transient = any(
-                    kw in err_str
-                    for kw in ("timeout", "connection", "rate", "503", "502", "429")
+        session = self.get_session(user_id, project_dir)
+        if not session:
+            # Try refreshing registry
+            self.refresh()
+            session = self.get_session(user_id, project_dir)
+            if not session:
+                available = list(self._sessions.keys())
+                raise RuntimeError(
+                    f"No tmux session for '{os.path.basename(project_dir)}'. "
+                    f"Available: {available or 'none'}. "
+                    f"Start Claude Code in tmux and register with register-session.sh"
                 )
-                if not transient or attempt == max_retries - 1:
-                    raise
-                wait = 2**attempt
-                log.warning(
-                    "Transient error (attempt %d/%d), retrying in %ds: %s",
-                    attempt + 1,
-                    max_retries,
-                    wait,
-                    e,
-                )
-                await asyncio.sleep(wait)
 
-        raise last_error  # unreachable but type-safe
+        return await session.execute(prompt, stream_cb)

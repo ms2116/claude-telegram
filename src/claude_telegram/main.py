@@ -48,8 +48,11 @@ async def _run() -> None:
     await store.init()
     log.info("Database: %s", settings.get_db_path())
 
-    # Initialize Claude manager
+    # Initialize Claude manager — load tmux sessions
     claude = ClaudeManager(settings)
+    claude.load_sessions()
+    sessions = claude.get_all_sessions()
+    log.info("Tmux sessions: %s", list(sessions.keys()) or "none")
 
     # Build bot
     bot = Bot(settings, claude, store)

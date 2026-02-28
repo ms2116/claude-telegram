@@ -1,12 +1,11 @@
 [project]
 name = "claude-telegram"
 version = "0.1.0"
-description = "Telegram bot for Claude Code via claude-agent-sdk"
+description = "Telegram bot for Claude Code via tmux session control"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "python-telegram-bot>=22.0",
-    "claude-agent-sdk>=0.1.39",
     "pydantic-settings>=2.0",
     "aiosqlite>=0.20.0",
 ]

@@ -341,6 +341,13 @@ class ClaudeManager:
             log.info("Created SDK session for %s", project_dir)
         return self._sessions[key]  # type: ignore[return-value]
 
+    def clear_sdk_session(self, project_dir: str) -> None:
+        """Remove SDK session so next message creates a fresh one."""
+        key = f"sdk:{project_dir}"
+        if key in self._sessions:
+            del self._sessions[key]
+            log.info("Cleared SDK session for %s", project_dir)
+
     async def execute_with_retry(
         self,
         user_id: int,

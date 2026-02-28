@@ -166,7 +166,7 @@ class Bot:
             await self.store.end_session(self._user_store_sessions[user.id])
             del self._user_store_sessions[user.id]
 
-        # In tmux mode, /new sends /new to Claude Code directly
+        # Tmux mode: send /new to Claude Code directly
         session = self.claude.get_session(user.id, project)
         if session:
             try:
@@ -177,7 +177,9 @@ class Bot:
                 log.warning("Failed to send /new", exc_info=True)
                 await update.message.reply_text("Failed to send /new.")  # type: ignore[union-attr]
         else:
-            await update.message.reply_text("No tmux session found for this project.")  # type: ignore[union-attr]
+            # SDK mode: clear the SDK session so next message starts fresh
+            self.claude.clear_sdk_session(project)
+            await update.message.reply_text("Session cleared. Next message will start a new session.")  # type: ignore[union-attr]
 
     async def cmd_project(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user

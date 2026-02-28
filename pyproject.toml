@@ -1,0 +1,22 @@
+[project]
+name = "claude-telegram"
+version = "0.1.0"
+description = "Telegram bot for Claude Code via claude-agent-sdk"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-telegram-bot>=22.0",
+    "claude-agent-sdk>=0.1.39",
+    "pydantic-settings>=2.0",
+    "aiosqlite>=0.20.0",
+]
+
+[project.scripts]
+claude-telegram = "claude_telegram.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_telegram"]

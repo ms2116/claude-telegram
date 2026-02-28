@@ -376,19 +376,81 @@ class ClaudeManager:
 # ── SDKSession — fallback for projects without tmux ──
 
 class SDKSession:
-    """Spawns a new Claude Code process via claude-agent-sdk."""
+    """Connects to existing or creates new Claude Code session via SDK."""
 
     def __init__(self, project_dir: str, settings: "Settings") -> None:
         self.project_dir = project_dir
         self.settings = settings
         self._client: Any = None
         self._running = False
-        self._sdk_session_id: str | None = None
+        self._sdk_session_id: str | None = self._find_latest_session()
         self.info = SessionInfo(
             project=os.path.basename(project_dir),
             pane_id="sdk",
             work_dir=project_dir,
         )
+        if self._sdk_session_id:
+            log.info("Found existing session for %s: %s", project_dir, self._sdk_session_id)
+
+    def _find_latest_session(self) -> str | None:
+        """Find the most recent session ID from ~/.claude/projects/."""
+        # Check multiple possible locations:
+        # 1. Native home (~/.claude/projects/)
+        # 2. WSL accessing Windows (/mnt/c/Users/<user>/.claude/projects/)
+        candidates = [Path.home() / ".claude" / "projects"]
+
+        # If running on WSL, also check Windows user dir
+        win_home = Path("/mnt/c/Users")
+        if win_home.exists():
+            for u in win_home.iterdir():
+                p = u / ".claude" / "projects"
+                if p.exists() and p not in candidates:
+                    candidates.append(p)
+
+        # Build encoded project dir name (path separators → hyphens)
+        # Windows: D:\project_2026\flipking → D--project-2026-flipking
+        # Linux /mnt/d/project_2026/flipking → also try D--project-2026-flipking
+        project_path = self.project_dir.replace("\\", "/")
+        encoded = project_path.replace(":", "-").replace("/", "-")
+        encoded = encoded.rstrip("-")
+
+        # For WSL /mnt/d/ paths, also try Windows-style encoding
+        alt_encoded = None
+        if project_path.startswith("/mnt/"):
+            # /mnt/d/project_2026/flipking → D--project-2026-flipking
+            parts = project_path.split("/")  # ['', 'mnt', 'd', 'project_2026', ...]
+            if len(parts) >= 3:
+                drive = parts[2].upper()
+                rest = "-".join(parts[3:])
+                alt_encoded = f"{drive}--{rest}".rstrip("-")
+
+        for claude_dir in candidates:
+            if not claude_dir.exists():
+                continue
+            for enc in [encoded, alt_encoded]:
+                if not enc:
+                    continue
+                project_session_dir = claude_dir / enc
+                if project_session_dir.exists():
+                    jsonl_files = sorted(
+                        project_session_dir.glob("*.jsonl"),
+                        key=lambda f: f.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if jsonl_files:
+                        return jsonl_files[0].stem
+            # Fallback: partial name match
+            project_name = os.path.basename(self.project_dir).lower()
+            for d in claude_dir.iterdir():
+                if d.is_dir() and project_name in d.name.lower():
+                    jsonl_files = sorted(
+                        d.glob("*.jsonl"),
+                        key=lambda f: f.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if jsonl_files:
+                        return jsonl_files[0].stem
+        return None
 
     async def execute(
         self,

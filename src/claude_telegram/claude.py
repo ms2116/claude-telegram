@@ -414,6 +414,9 @@ class SDKSession:
         encoded = project_path.replace(":", "-").replace("/", "-")
         encoded = encoded.rstrip("-")
 
+        # Claude Code encodes underscores as hyphens too
+        encoded = encoded.replace("_", "-")
+
         # For WSL /mnt/d/ paths, also try Windows-style encoding
         alt_encoded = None
         if project_path.startswith("/mnt/"):
@@ -421,7 +424,7 @@ class SDKSession:
             parts = project_path.split("/")  # ['', 'mnt', 'd', 'project_2026', ...]
             if len(parts) >= 3:
                 drive = parts[2].upper()
-                rest = "-".join(parts[3:])
+                rest = "-".join(parts[3:]).replace("_", "-")
                 alt_encoded = f"{drive}--{rest}".rstrip("-")
 
         for claude_dir in candidates:

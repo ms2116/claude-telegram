@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import signal
 import sys
-from pathlib import Path
 
 from .bot import Bot
 from .claude import ClaudeManager
@@ -28,7 +26,14 @@ def _setup_logging(level: str) -> None:
     logging.getLogger("telegram").setLevel(logging.WARNING)
 
 
-async def _run() -> None:
+async def _init_store(settings: Settings) -> Store:
+    store = Store(settings.get_db_path())
+    await store.init()
+    return store
+
+
+def main() -> None:
+    """Entry point for `uv run claude-telegram`."""
     # Load settings
     try:
         settings = Settings()  # type: ignore[call-arg]
@@ -43,9 +48,8 @@ async def _run() -> None:
     log.info("Allowed users: %s", settings.get_allowed_users() or "all")
     log.info("Permission mode: %s", settings.permission_mode)
 
-    # Initialize store
-    store = Store(settings.get_db_path())
-    await store.init()
+    # Initialize store (need a quick event loop for async init)
+    store = asyncio.run(_init_store(settings))
     log.info("Database: %s", settings.get_db_path())
 
     # Initialize Claude manager — load tmux sessions
@@ -54,55 +58,13 @@ async def _run() -> None:
     sessions = claude.get_all_sessions()
     log.info("Tmux sessions: %s", list(sessions.keys()) or "none")
 
-    # Build bot
+    # Build and run bot
+    # run_polling handles its own event loop, signals, and graceful shutdown
     bot = Bot(settings, claude, store)
     app = bot.build_application()
-
-    # Run with graceful shutdown
-    try:
-        await app.initialize()
-        await app.start()
-        log.info("Bot started. Polling for updates...")
-        await app.updater.start_polling(drop_pending_updates=True)
-
-        # Wait until stopped
-        stop_event = asyncio.Event()
-
-        def _signal_handler() -> None:
-            log.info("Shutdown signal received")
-            stop_event.set()
-
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, _signal_handler)
-            except NotImplementedError:
-                # Windows doesn't support add_signal_handler
-                pass
-
-        # On Windows, use keyboard interrupt
-        try:
-            await stop_event.wait()
-        except KeyboardInterrupt:
-            log.info("Keyboard interrupt")
-
-    finally:
-        log.info("Shutting down...")
-        if app.updater and app.updater.running:
-            await app.updater.stop()
-        if app.running:
-            await app.stop()
-        await app.shutdown()
-        await store.close()
-        log.info("Goodbye.")
-
-
-def main() -> None:
-    """Entry point for `uv run claude-telegram`."""
-    try:
-        asyncio.run(_run())
-    except KeyboardInterrupt:
-        pass
+    log.info("Starting polling...")
+    app.run_polling(drop_pending_updates=True)
+    log.info("Bot stopped.")
 
 
 if __name__ == "__main__":

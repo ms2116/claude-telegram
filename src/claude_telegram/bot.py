@@ -218,7 +218,21 @@ class Bot:
         for d in self.settings.get_project_dirs():
             if target.lower() in (d.lower(), os.path.basename(d).lower()):
                 self._user_projects[user.id] = d
-                await update.message.reply_text(f"Switched to: {os.path.basename(d)} (SDK mode)")  # type: ignore[union-attr]
+                # Show available sessions for selection
+                from .claude import SDKSession
+                found = SDKSession.find_sessions(d, limit=5)
+                lines = [f"Switched to: {os.path.basename(d)} (SDK mode)"]
+                if found:
+                    lines.append("\nRecent sessions:")
+                    for i, s in enumerate(found):
+                        import time as _time
+                        ts = _time.strftime("%m/%d %H:%M", _time.localtime(s["mtime"]))
+                        marker = " *" if i == 0 else ""
+                        lines.append(f"  {i+1}. {s['id'][:8]}... ({ts}, {s['source']}){marker}")
+                    lines.append(f"\nAuto-resuming #{1}. Use /session <n> to pick another.")
+                else:
+                    lines.append("No previous sessions. Will start new.")
+                await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
                 return
         available = list(sessions.keys()) + [os.path.basename(d) for d in self.settings.get_project_dirs()]
         await update.message.reply_text(f"Not found: {target}\nAvailable: {available}")  # type: ignore[union-attr]
@@ -270,6 +284,50 @@ class Bot:
         if not sessions:
             lines.append("  No tmux sessions found")
         await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
+
+    async def cmd_session(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Select a specific session for the current SDK project."""
+        user = update.effective_user
+        if not user or not self._is_allowed(user.id):
+            return
+        project = self._get_project(user.id)
+        if not project:
+            await update.message.reply_text("No active project.")  # type: ignore[union-attr]
+            return
+
+        from .claude import SDKSession
+        found = SDKSession.find_sessions(project, limit=5)
+        if not found:
+            await update.message.reply_text("No sessions found for this project.")  # type: ignore[union-attr]
+            return
+
+        args = (update.message.text or "").split(maxsplit=1)  # type: ignore[union-attr]
+        if len(args) < 2:
+            # Show session list
+            import time as _time
+            lines = [f"Sessions for {os.path.basename(project)}:"]
+            for i, s in enumerate(found):
+                ts = _time.strftime("%m/%d %H:%M", _time.localtime(s["mtime"]))
+                lines.append(f"  {i+1}. {s['id'][:8]}... ({ts}, {s['source']})")
+            lines.append(f"\nUsage: /session <number>")
+            await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
+            return
+
+        try:
+            idx = int(args[1].strip()) - 1
+            if 0 <= idx < len(found):
+                chosen = found[idx]
+                # Clear existing SDK session and set the chosen one
+                self.claude.clear_sdk_session(project)
+                sdk = self.claude.get_or_create_sdk_session(project)
+                sdk._sdk_session_id = chosen["id"]
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    f"Session set: {chosen['id'][:8]}... ({chosen['source']})"
+                )
+            else:
+                await update.message.reply_text(f"Invalid. Choose 1-{len(found)}")  # type: ignore[union-attr]
+        except ValueError:
+            await update.message.reply_text("Usage: /session <number>")  # type: ignore[union-attr]
 
     async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -436,6 +494,7 @@ class Bot:
         app.add_handler(CommandHandler("project", self.cmd_project))
         app.add_handler(CommandHandler("projects", self.cmd_projects))
         app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("session", self.cmd_session))
         app.add_handler(CommandHandler("refresh", self.cmd_refresh))
         # Messages (text, documents, photos)
         app.add_handler(

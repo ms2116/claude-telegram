@@ -399,75 +399,88 @@ class SDKSession:
         if self._sdk_session_id:
             log.info("Found existing session for %s: %s", project_dir, self._sdk_session_id)
 
-    def _find_latest_session(self) -> str | None:
-        """Find the most recent session ID from ~/.claude/projects/."""
-        # Check multiple possible locations:
-        # 1. Windows user dir (via WSL /mnt/c/) — primary for Windows projects
-        # 2. Native home (~/.claude/projects/) — for WSL projects
-        # Windows first because SDK creates sessions in WSL home, but the
-        # user's real active session is in Windows ~/.claude/
-        candidates: list[Path] = []
+    @staticmethod
+    def find_sessions(project_dir: str, limit: int = 5) -> list[dict]:
+        """Find recent session IDs from ~/.claude/projects/.
 
-        # If running on WSL, check Windows user dir first
+        Returns list of {id, mtime, source} dicts, newest first.
+        """
+        results: list[dict] = []
+        seen_ids: set[str] = set()
+
+        # Check Windows first (via WSL /mnt/c/), then native home
+        candidates: list[Path] = []
         win_home = Path("/mnt/c/Users")
         if win_home.exists():
             for u in win_home.iterdir():
                 p = u / ".claude" / "projects"
                 if p.exists():
                     candidates.append(p)
-
-        # Then check native home
         native = Path.home() / ".claude" / "projects"
         if native.exists() and native not in candidates:
             candidates.append(native)
 
-        # Build encoded project dir name (path separators → hyphens)
-        # Windows: D:\project_2026\flipking → D--project-2026-flipking
-        # Linux /mnt/d/project_2026/flipking → also try D--project-2026-flipking
-        project_path = self.project_dir.replace("\\", "/")
-        encoded = project_path.replace(":", "-").replace("/", "-")
-        encoded = encoded.rstrip("-")
-
-        # Claude Code encodes underscores as hyphens too
-        encoded = encoded.replace("_", "-")
+        # Build encoded project dir name
+        project_path = project_dir.replace("\\", "/")
+        encoded = project_path.replace(":", "-").replace("/", "-").rstrip("-").replace("_", "-")
 
         # For WSL /mnt/d/ paths, also try Windows-style encoding
-        alt_encoded = None
+        encodings = [encoded]
         if project_path.startswith("/mnt/"):
-            # /mnt/d/project_2026/flipking → D--project-2026-flipking
-            parts = project_path.split("/")  # ['', 'mnt', 'd', 'project_2026', ...]
+            parts = project_path.split("/")
             if len(parts) >= 3:
                 drive = parts[2].upper()
                 rest = "-".join(parts[3:]).replace("_", "-")
-                alt_encoded = f"{drive}--{rest}".rstrip("-")
+                encodings.append(f"{drive}--{rest}".rstrip("-"))
 
         for claude_dir in candidates:
             if not claude_dir.exists():
                 continue
-            for enc in [encoded, alt_encoded]:
-                if not enc:
-                    continue
-                project_session_dir = claude_dir / enc
-                if project_session_dir.exists():
-                    jsonl_files = sorted(
-                        project_session_dir.glob("*.jsonl"),
+            source = "windows" if "/mnt/c/" in str(claude_dir) else "wsl"
+            # Try exact and alt encodings
+            for enc in encodings:
+                session_dir = claude_dir / enc
+                if session_dir.exists():
+                    for f in sorted(
+                        session_dir.glob("*.jsonl"),
                         key=lambda f: f.stat().st_mtime,
                         reverse=True,
-                    )
-                    if jsonl_files:
-                        return jsonl_files[0].stem
+                    ):
+                        sid = f.stem
+                        if sid not in seen_ids:
+                            seen_ids.add(sid)
+                            results.append({
+                                "id": sid,
+                                "mtime": f.stat().st_mtime,
+                                "source": source,
+                            })
+                        if len(results) >= limit:
+                            return results
             # Fallback: partial name match
-            project_name = os.path.basename(self.project_dir).lower()
+            project_name = os.path.basename(project_dir).lower()
             for d in claude_dir.iterdir():
                 if d.is_dir() and project_name in d.name.lower():
-                    jsonl_files = sorted(
+                    for f in sorted(
                         d.glob("*.jsonl"),
                         key=lambda f: f.stat().st_mtime,
                         reverse=True,
-                    )
-                    if jsonl_files:
-                        return jsonl_files[0].stem
-        return None
+                    ):
+                        sid = f.stem
+                        if sid not in seen_ids:
+                            seen_ids.add(sid)
+                            results.append({
+                                "id": sid,
+                                "mtime": f.stat().st_mtime,
+                                "source": source,
+                            })
+                        if len(results) >= limit:
+                            return results
+        return results
+
+    def _find_latest_session(self) -> str | None:
+        """Find the most recent session ID."""
+        sessions = self.find_sessions(self.project_dir, limit=1)
+        return sessions[0]["id"] if sessions else None
 
     async def execute(
         self,

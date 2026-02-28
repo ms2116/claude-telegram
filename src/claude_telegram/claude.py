@@ -60,9 +60,11 @@ class ClaudeSession:
         opts: dict[str, Any] = {
             "cwd": self.project_dir,
             "permission_mode": self.settings.permission_mode,
+            "env": {"CLAUDECODE": ""},  # allow running inside Claude Code session
         }
-        if self.settings.allowed_tools:
-            opts["allowed_tools"] = self.settings.allowed_tools
+        tools = self.settings.get_allowed_tools()
+        if tools:
+            opts["allowed_tools"] = tools
         if self.settings.model:
             opts["model"] = self.settings.model
         if self.settings.max_turns > 0:
@@ -92,6 +94,8 @@ class ClaudeSession:
             await self._client.query(prompt)
 
             async for msg in self._client.receive_response():
+                log.debug("SDK message: type=%s %r", type(msg).__name__, msg)
+
                 if isinstance(msg, SystemMessage):
                     if msg.subtype == "init" and hasattr(msg, "data"):
                         sid = msg.data.get("session_id")
@@ -101,14 +105,13 @@ class ClaudeSession:
 
                 elif isinstance(msg, AssistantMessage):
                     for block in msg.content:
+                        log.debug("Content block: type=%s %r", type(block).__name__, block)
                         if isinstance(block, TextBlock) and block.text:
                             text_parts.append(block.text)
                             if stream_cb:
                                 await stream_cb(block.text, False)
                         elif isinstance(block, ToolUseBlock):
                             result.tools_used.append(block.name)
-                        elif isinstance(block, ToolResultBlock):
-                            pass  # tool results handled internally
 
                 elif isinstance(msg, ResultMessage):
                     result.cost_usd = msg.total_cost_usd
@@ -120,6 +123,11 @@ class ClaudeSession:
                     if msg.usage:
                         result.input_tokens = msg.usage.get("input_tokens", 0)
                         result.output_tokens = msg.usage.get("output_tokens", 0)
+                    # Fallback: use result text if no streaming text was captured
+                    if not text_parts and msg.result:
+                        text_parts.append(msg.result)
+                        if stream_cb:
+                            await stream_cb(msg.result, False)
 
             result.text = "".join(text_parts)
             if stream_cb:

@@ -5,21 +5,20 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    model_config = {"env_prefix": "CT_"}
+    model_config = {"env_prefix": "CT_", "env_file": ".env", "env_file_encoding": "utf-8"}
 
     # Telegram
     telegram_bot_token: str
-    allowed_users: list[int] = []
+    allowed_users: str = ""  # comma-separated user IDs
 
     # Claude
-    project_dirs: list[str] = []
+    project_dirs: str = ""  # comma-separated paths
     permission_mode: str = "acceptEdits"
-    allowed_tools: list[str] = []
+    allowed_tools: str = ""  # comma-separated tool names
     model: str = ""
     max_turns: int = 0
 
@@ -29,26 +28,28 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
-    @field_validator("allowed_users", mode="before")
-    @classmethod
-    def parse_int_list(cls, v: str | list) -> list[int]:
-        if isinstance(v, str):
-            return [int(x.strip()) for x in v.split(",") if x.strip()]
-        return v
+    def get_allowed_users(self) -> list[int]:
+        if not self.allowed_users:
+            return []
+        return [int(x.strip()) for x in self.allowed_users.split(",") if x.strip()]
 
-    @field_validator("project_dirs", "allowed_tools", mode="before")
-    @classmethod
-    def parse_str_list(cls, v: str | list) -> list[str]:
-        if isinstance(v, str):
-            return [x.strip() for x in v.split(",") if x.strip()]
-        return v
+    def get_project_dirs(self) -> list[str]:
+        if not self.project_dirs:
+            return []
+        return [x.strip() for x in self.project_dirs.split(",") if x.strip()]
+
+    def get_allowed_tools(self) -> list[str]:
+        if not self.allowed_tools:
+            return []
+        return [x.strip() for x in self.allowed_tools.split(",") if x.strip()]
 
     def get_db_path(self) -> Path:
         if self.db_path:
             return Path(self.db_path)
-        base = Path(os.environ.get("HOME", Path.home())) / ".claude-telegram"
+        base = Path(os.environ.get("HOME", str(Path.home()))) / ".claude-telegram"
         base.mkdir(parents=True, exist_ok=True)
         return base / "store.db"
 
     def get_default_project(self) -> str | None:
-        return self.project_dirs[0] if self.project_dirs else None
+        dirs = self.get_project_dirs()
+        return dirs[0] if dirs else None

@@ -39,8 +39,8 @@ async def _run() -> None:
 
     _setup_logging(settings.log_level)
     log.info("Starting claude-telegram bot")
-    log.info("Projects: %s", settings.project_dirs)
-    log.info("Allowed users: %s", settings.allowed_users or "all")
+    log.info("Projects: %s", settings.get_project_dirs())
+    log.info("Allowed users: %s", settings.get_allowed_users() or "all")
     log.info("Permission mode: %s", settings.permission_mode)
 
     # Initialize store

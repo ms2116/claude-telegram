@@ -78,7 +78,8 @@ class Bot:
         self._user_store_sessions: dict[int, int] = {}
 
     def _is_allowed(self, user_id: int) -> bool:
-        return not self.settings.allowed_users or user_id in self.settings.allowed_users
+        allowed = self.settings.get_allowed_users()
+        return not allowed or user_id in allowed
 
     def _get_project(self, user_id: int) -> str | None:
         if user_id in self._user_projects:
@@ -91,10 +92,16 @@ class Bot:
     async def _ensure_store_session(self, user_id: int, project_dir: str) -> int:
         if user_id in self._user_store_sessions:
             return self._user_store_sessions[user_id]
-        # Check for existing active session
+        # Check for existing active session — restore SDK session for resume
         existing = await self.store.get_active_session(user_id, project_dir)
         if existing:
             self._user_store_sessions[user_id] = existing["id"]
+            # Restore SDK session ID so ClaudeSession can resume
+            sdk_sid = existing.get("sdk_session_id")
+            if sdk_sid:
+                session = self.claude.get_session(user_id, project_dir)
+                session._sdk_session_id = sdk_sid
+                log.info("Restored session %s for project %s", sdk_sid[:8], project_dir)
             return existing["id"]
         sid = await self.store.create_session(user_id, project_dir)
         self._user_store_sessions[user_id] = sid
@@ -193,7 +200,7 @@ class Bot:
             return
         target = args[1].strip()
         # Match by name (basename) or full path
-        for d in self.settings.project_dirs:
+        for d in self.settings.get_project_dirs():
             if target == d or target == os.path.basename(d):
                 self._user_projects[user.id] = d
                 await update.message.reply_text(f"Switched to: `{d}`")  # type: ignore[union-attr]
@@ -209,12 +216,13 @@ class Bot:
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
-        if not self.settings.project_dirs:
+        dirs = self.settings.get_project_dirs()
+        if not dirs:
             await update.message.reply_text("No projects configured. Set CT_PROJECT_DIRS.")  # type: ignore[union-attr]
             return
         current = self._get_project(user.id)
         lines = []
-        for d in self.settings.project_dirs:
+        for d in dirs:
             marker = " (active)" if d == current else ""
             lines.append(f"  {os.path.basename(d)} — {d}{marker}")
         await update.message.reply_text("Projects:\n" + "\n".join(lines))  # type: ignore[union-attr]
@@ -307,41 +315,25 @@ class Bot:
                 system_prompt=system_prompt,
             )
 
-            # Final message — send full text, possibly split
-            if result.text:
-                full_text = result.text.strip()
-                # If text was already shown via streaming and is short enough, it's already there
-                if len(full_text) > TG_MAX_LEN - 100:
-                    # Delete streaming message and send split messages
+            # Build final display text
+            display_text = result.text.strip() if result.text else ""
+            if not display_text and not accumulated:
+                display_text = "(no text response — tools were used)"
+
+            # Send final message
+            if display_text:
+                if len(display_text) > TG_MAX_LEN - 100:
                     try:
                         await reply.delete()
                     except Exception:
                         pass
-                    for part in _split_message(full_text):
+                    for part in _split_message(display_text):
                         await msg.reply_text(part)
                 else:
-                    # Final edit to ensure complete text
                     try:
-                        await reply.edit_text(full_text)
+                        await reply.edit_text(display_text)
                     except Exception:
                         pass
-            elif not accumulated:
-                await reply.edit_text("(no text response — tools were used)")
-
-            # Append cost info
-            cost_line = ""
-            if result.cost_usd is not None:
-                cost_line = f"\n\n💲 ${result.cost_usd:.4f}"
-                if result.tools_used:
-                    unique_tools = sorted(set(result.tools_used))
-                    cost_line += f" | Tools: {', '.join(unique_tools)}"
-
-            if cost_line:
-                try:
-                    current = reply.text or "".join(accumulated)
-                    await reply.edit_text(_truncate(current + cost_line))
-                except Exception:
-                    pass
 
             # Log cost
             await self.store.log_cost(

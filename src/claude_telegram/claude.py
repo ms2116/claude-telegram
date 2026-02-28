@@ -402,17 +402,24 @@ class SDKSession:
     def _find_latest_session(self) -> str | None:
         """Find the most recent session ID from ~/.claude/projects/."""
         # Check multiple possible locations:
-        # 1. Native home (~/.claude/projects/)
-        # 2. WSL accessing Windows (/mnt/c/Users/<user>/.claude/projects/)
-        candidates = [Path.home() / ".claude" / "projects"]
+        # 1. Windows user dir (via WSL /mnt/c/) — primary for Windows projects
+        # 2. Native home (~/.claude/projects/) — for WSL projects
+        # Windows first because SDK creates sessions in WSL home, but the
+        # user's real active session is in Windows ~/.claude/
+        candidates: list[Path] = []
 
-        # If running on WSL, also check Windows user dir
+        # If running on WSL, check Windows user dir first
         win_home = Path("/mnt/c/Users")
         if win_home.exists():
             for u in win_home.iterdir():
                 p = u / ".claude" / "projects"
-                if p.exists() and p not in candidates:
+                if p.exists():
                     candidates.append(p)
+
+        # Then check native home
+        native = Path.home() / ".claude" / "projects"
+        if native.exists() and native not in candidates:
+            candidates.append(native)
 
         # Build encoded project dir name (path separators → hyphens)
         # Windows: D:\project_2026\flipking → D--project-2026-flipking

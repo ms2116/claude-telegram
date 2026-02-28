@@ -360,6 +360,15 @@ class ClaudeManager:
             return await session.execute(prompt, stream_cb)
 
         # Fallback: SDK session for projects without tmux
+        if not HAS_SDK:
+            project_name = os.path.basename(project_dir.rstrip("/"))
+            tmux_names = list(self._sessions.keys())
+            raise RuntimeError(
+                f"No tmux session for '{project_name}'.\n"
+                f"Available tmux sessions: {tmux_names or 'none'}\n\n"
+                f"Use /project <name> to switch, or install SDK:\n"
+                f"uv add claude-agent-sdk"
+            )
         sdk_session = self.get_or_create_sdk_session(project_dir)
         return await sdk_session.execute(prompt, stream_cb)
 

@@ -291,6 +291,8 @@ class Bot:
             await msg.reply_text("No project configured. Set CT_PROJECT_DIRS in .env")
             return
 
+        log.info("Message from %s → project %s", user.id, project)
+
         # Build prompt from text + files
         prompt = await self._build_prompt(msg, ctx)
         if not prompt:

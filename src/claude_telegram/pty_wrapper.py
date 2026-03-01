@@ -374,6 +374,22 @@ class PtyWrapper:
 
     # ── Screen snapshot → TCP broadcast ──
 
+    # Lines to filter from pyte snapshots (Claude Code TUI chrome)
+    _SNAPSHOT_FILTER = (
+        "? for shortcuts",
+        "? for s",
+        "! for bash mode",
+        "/ for commands",
+        "shift + tab",
+        "double tap esc",
+        "ctrl + shift",
+        "alt + v to paste",
+        "ctrl + o for verbose",
+        "meta + p to switch",
+        "@ for file paths",
+        "esc to interrupt",
+    )
+
     def _snapshot_thread(self):
         """Periodically capture pyte screen and broadcast to TCP clients."""
         while self._running:
@@ -386,8 +402,16 @@ class PtyWrapper:
                     chars = []
                     for col in range(self._screen.columns):
                         chars.append(line[col].data)
-                    lines.append("".join(chars).rstrip())
+                    text = "".join(chars).rstrip()
+                    # Filter TUI chrome lines
+                    stripped = text.strip()
+                    if stripped and any(f in stripped for f in self._SNAPSHOT_FILTER):
+                        continue
+                    lines.append(text)
                 snapshot = "\n".join(lines).rstrip()
+
+            # Also filter DA response from snapshot
+            snapshot = DA_RE.sub("", snapshot)
 
             if snapshot != self._last_snapshot:
                 self._last_snapshot = snapshot
@@ -437,8 +461,7 @@ class PtyWrapper:
                 daemon=True,
             ).start()
 
-            sys.stderr.write(f"[bridge-claude] Client connected: {addr}\n")
-            sys.stderr.flush()
+            # Don't log to stderr during TUI — it corrupts the display
 
     def _client_recv_thread(self, client: JsonLinesClient):
         """Read JSON-Lines from a TCP client, forward input to PTY."""

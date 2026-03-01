@@ -140,16 +140,30 @@ class PtyWrapper:
         self._running = True
         self._pty = None
         self._registered = False
-        # pyte virtual terminal for screen snapshots
-        self._screen = pyte.Screen(PTY_COLS, PTY_ROWS)
-        self._stream = pyte.Stream(self._screen)
+        # pyte virtual terminal (initialized in start() with actual terminal size)
+        self._screen: pyte.Screen | None = None
+        self._stream: pyte.Stream | None = None
         self._screen_lock = threading.Lock()
         self._last_snapshot = ""
+
+    @staticmethod
+    def _detect_terminal_size() -> tuple[int, int]:
+        """Detect actual terminal size, fallback to defaults."""
+        try:
+            size = os.get_terminal_size()
+            return size.columns, size.lines
+        except OSError:
+            return PTY_COLS, PTY_ROWS
 
     def start(self):
         from winpty import PTY  # type: ignore[import-untyped]
 
-        self._pty = PTY(PTY_COLS, PTY_ROWS)
+        # Detect actual terminal size
+        cols, rows = self._detect_terminal_size()
+        self._screen = pyte.Screen(cols, rows)
+        self._stream = pyte.Stream(self._screen)
+
+        self._pty = PTY(cols, rows)
         self._pty.spawn(self.cmd)
 
         if not self.no_register:

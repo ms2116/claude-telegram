@@ -13,9 +13,11 @@ dependencies = [
 
 [project.optional-dependencies]
 sdk = ["claude-agent-sdk>=0.1.39"]
+windows = ["pywinpty>=3.0"]
 
 [project.scripts]
 claude-telegram = "claude_telegram.main:main"
+bridge-claude = "claude_telegram.pty_wrapper:main"
 
 [build-system]
 requires = ["hatchling"]

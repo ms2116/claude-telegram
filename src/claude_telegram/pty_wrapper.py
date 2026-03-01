@@ -26,7 +26,13 @@ import time
 from pathlib import Path
 from typing import BinaryIO
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\(B")
+ANSI_RE = re.compile(
+    r"\x1b\[[\x20-\x3f]*[0-9;]*[\x20-\x7e]"  # CSI sequences (incl. ?2026h etc.)
+    r"|\x1b\][^\x07]*(?:\x07|\x1b\\)"          # OSC sequences (title, etc.)
+    r"|\x1b\([A-Z]"                              # Character set selection
+    r"|\x1b[=>NOM78]"                            # Other ESC sequences
+    r"|[\x00-\x08\x0e-\x1f]"                    # Control chars (except \t \n \r)
+)
 DEFAULT_PORT = 50001
 WSL_SESSION_DIR = "/tmp/claude_sessions"
 # Repo root: pty_wrapper.py → src/claude_telegram/ → src/ → repo

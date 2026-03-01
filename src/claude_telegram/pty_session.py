@@ -132,7 +132,8 @@ class WindowsPtySession:
             before = await self._get_buffer_snapshot()
 
             # Send prompt as input
-            await self._send_json({"type": "input", "data": prompt + "\n"})
+            # PTY raw mode expects \r for Enter (not \n)
+            await self._send_json({"type": "input", "data": prompt + "\r"})
             log.info("PTY sent to %s: %s", self.info.project, prompt[:80])
 
             await asyncio.sleep(MIN_WAIT)

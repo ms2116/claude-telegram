@@ -18,6 +18,9 @@
 
 ## 작동 방식
 
+두 가지 모드를 지원합니다:
+
+**WSL/Linux (tmux 모드)**
 ```mermaid
 sequenceDiagram
     participant T as 📱 Telegram
@@ -33,7 +36,26 @@ sequenceDiagram
     B->>T: ✅ 완료 알림
 ```
 
-tmux 위에서 돌아가는 Claude Code 세션에 직접 연결합니다. SDK나 API 래퍼 없이, `send-keys`로 입력하고 `capture-pane`으로 출력을 읽어오는 단순한 구조입니다.
+**Windows (bridge-claude 모드)**
+```mermaid
+sequenceDiagram
+    participant T as 📱 Telegram
+    participant B as 🤖 Bot (WSL)
+    participant W as 🌉 bridge-claude (Windows)
+    participant C as 🖥️ Claude Code
+
+    W->>C: pywinpty PTY 스폰
+    T->>B: 메시지 전송
+    B->>W: TCP JSON-Lines
+    W->>C: PTY 입력 전달
+    loop 0.5초 스냅샷
+        C-->>W: PTY 출력
+        W->>W: pyte 가상 터미널 렌더링
+        W-->>B: 화면 스냅샷
+        B-->>T: edit_message
+    end
+    B->>T: ✅ 완료 알림
+```
 
 ## 주요 기능
 
@@ -60,13 +82,55 @@ tmux 위에서 돌아가는 Claude Code 세션에 직접 연결합니다. SDK나
 
 ## 빠른 시작
 
+### WSL/Linux (tmux 모드)
+
 ```bash
+# 1. 클론 + 설정
 git clone https://github.com/ms2116/claude-telegram.git
 cd claude-telegram
-uv sync
 cp .env.example .env   # 토큰, 유저 ID, 프로젝트 경로 설정
-uv run claude-telegram
+
+# 2. Claude Code 훅 등록 (한 번만)
+# ~/.claude/settings.json 에 아래 내용 추가:
+cat <<'EOF'
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "bash /path/to/claude-telegram/register-session.sh"}]
+    }],
+    "SessionEnd": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "bash /path/to/claude-telegram/unregister-session.sh"}]
+    }]
+  }
+}
+EOF
+
+# 3. tmux에서 Claude Code 실행하면 봇이 자동 기동됩니다
+tmux new -s myproject
+claude --dangerously-skip-permissions
+# → 봇 자동 시작 → 텔레그램에 알림
 ```
+
+### Windows (bridge-claude 모드)
+
+```bash
+# 1. 클론 + 설정 (WSL에서)
+git clone https://github.com/ms2116/claude-telegram.git
+cd claude-telegram
+cp .env.example .env   # 토큰, 유저 ID, 프로젝트 경로 설정
+
+# 2. Windows에서 bridge-claude 설치 (한 번만)
+uv tool install .
+
+# 3. 프로젝트 디렉토리에서 실행
+cd D:\your\project
+bridge-claude --dangerously-skip-permissions
+# → WSL 세션 자동등록 + 봇 자동 기동 + Claude Code 시작
+```
+
+> bridge-claude는 Claude Code를 PTY로 감싸서, 터미널에서 직접 사용하면서 동시에 텔레그램으로 원격 제어할 수 있게 합니다.
 
 ## 설정
 
@@ -83,18 +147,25 @@ uv run claude-telegram
 
 ## 자동 세션 관리
 
-`~/.claude/settings.json`에 hook을 등록하면, Claude Code 세션이 시작/종료될 때 봇이 자동으로 감지합니다.
+| 모드 | 봇 기동 | 세션 등록 | 봇 종료 |
+|------|---------|----------|---------|
+| **WSL tmux** | SessionStart 훅 → `register-session.sh` → `run.sh` | 훅이 `/tmp/claude_sessions/`에 JSON 생성 | SessionEnd 훅 → 마지막 세션이면 봇 종료 |
+| **Windows PTY** | `bridge-claude` → `_ensure_bot_running()` | bridge-claude가 WSL에 JSON 직접 생성 | bridge-claude 종료 → 세션 해제 → 봇 자동 종료 |
+
+### WSL 훅 설정
+
+`~/.claude/settings.json`에 등록합니다 (한 번만):
 
 ```json
 {
   "hooks": {
     "SessionStart": [{
       "matcher": "",
-      "hooks": [{"type": "command", "command": "bash /path/to/register-session.sh"}]
+      "hooks": [{"type": "command", "command": "bash /path/to/claude-telegram/register-session.sh"}]
     }],
     "SessionEnd": [{
       "matcher": "",
-      "hooks": [{"type": "command", "command": "bash /path/to/unregister-session.sh"}]
+      "hooks": [{"type": "command", "command": "bash /path/to/claude-telegram/unregister-session.sh"}]
     }]
   }
 }
@@ -102,9 +173,15 @@ uv run claude-telegram
 
 > [!IMPORTANT]
 > `settings.local.json`이 아닌 **`settings.json`** 에 등록해야 합니다.<br/>
-> `"matcher": ""`와 `bash` 명시가 필수입니다.
+> `"matcher": ""`와 `bash` 명시가 필수입니다.<br/>
+> `/path/to/`는 실제 클론 경로로 교체하세요.
 
-**동작 흐름**: hook이 `/tmp/claude_sessions/`에 세션 파일 생성 → 봇의 백그라운드 감시자(30초 주기)가 감지 → 텔레그램 알림 전송
+### Windows bridge-claude
+
+별도 훅 설정 불필요. `bridge-claude` 실행 시 자동으로:
+1. WSL distro 감지 → `/tmp/claude_sessions/`에 세션 등록
+2. 봇이 안 돌고 있으면 자동 기동
+3. 종료 시 세션 해제
 
 ## 프로덕션
 
@@ -116,14 +193,14 @@ bash run.sh   # PID 잠금 + circuit breaker + 자동 재시작
 
 ```
 src/claude_telegram/
-├── config.py    # 환경변수 (pydantic-settings, CT_ prefix)
-├── claude.py    # TmuxSession + ClaudeManager
-├── bot.py       # 텔레그램 핸들러, 스트리밍
-├── store.py     # SQLite 세션 로깅
-└── main.py      # 엔트리포인트, 기동 알림
+├── config.py        # 환경변수 (pydantic-settings, CT_ prefix)
+├── claude.py        # TmuxSession + ClaudeManager + SDK 폴백
+├── pty_wrapper.py   # bridge-claude: pywinpty + pyte PTY 래퍼 (Windows)
+├── pty_session.py   # WindowsPtySession: TCP 클라이언트 (봇↔bridge-claude)
+├── bot.py           # 텔레그램 핸들러, 스트리밍
+├── store.py         # SQLite 세션 로깅
+└── main.py          # 엔트리포인트, 기동 알림
 ```
-
-5개 파일, ~800줄. 과잉 설계 없음.
 
 ## 라이선스
 

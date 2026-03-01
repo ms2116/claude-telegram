@@ -62,6 +62,15 @@ class SessionResult:
 
 # ── Low-level tmux utils ──
 
+def _win_to_wsl_path(win_path: str) -> str:
+    """Convert Windows path to WSL: D:\\foo\\bar → /mnt/d/foo/bar"""
+    path = str(win_path).replace("\\", "/")
+    if len(path) >= 2 and path[1] == ":":
+        drive = path[0].lower()
+        return f"/mnt/{drive}{path[2:]}"
+    return path
+
+
 def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text)
 
@@ -578,8 +587,16 @@ class ClaudeManager:
                 dead.append(name)
         for name in dead:
             del self._sessions[name]
+            # Only delete session file for tmux sessions;
+            # PTY files should persist (bridge-claude may reconnect later)
             f = SESSION_DIR / f"{name}.json"
-            f.unlink(missing_ok=True)
+            if f.exists():
+                try:
+                    data = json.loads(f.read_text())
+                    if data.get("type") != "pty":
+                        f.unlink(missing_ok=True)
+                except Exception:
+                    f.unlink(missing_ok=True)
             log.info("Removed dead session: %s", name)
 
     async def connect_pty_sessions(self) -> None:
@@ -671,6 +688,11 @@ class ClaudeManager:
             return await session.execute(prompt, stream_cb)
 
         # Fallback: SDK session for projects without tmux
+        # Convert Windows paths to WSL paths for SDK subprocess
+        sdk_dir = project_dir
+        if len(sdk_dir) >= 2 and sdk_dir[1] == ":" or "\\" in sdk_dir:
+            sdk_dir = _win_to_wsl_path(sdk_dir)
+
         if not HAS_SDK:
             project_name = os.path.basename(project_dir.rstrip("/"))
             tmux_names = list(self._sessions.keys())
@@ -680,7 +702,7 @@ class ClaudeManager:
                 f"Use /project <name> to switch, or install SDK:\n"
                 f"uv add claude-agent-sdk"
             )
-        sdk_session = self.get_or_create_sdk_session(project_dir)
+        sdk_session = self.get_or_create_sdk_session(sdk_dir)
         return await sdk_session.execute(prompt, stream_cb)
 
 

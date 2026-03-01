@@ -178,6 +178,7 @@ class PtyWrapper:
         threads = [
             threading.Thread(target=self._stdin_thread, daemon=True),
             threading.Thread(target=self._pty_read_thread, daemon=True),
+            threading.Thread(target=self._display_thread, daemon=True),
             threading.Thread(target=self._snapshot_thread, daemon=True),
             threading.Thread(target=self._tcp_server_thread, daemon=True),
         ]
@@ -345,11 +346,7 @@ class PtyWrapper:
     # ── PTY → stdout + pyte screen ──
 
     def _pty_read_thread(self):
-        """Poll PTY output, batch writes to reduce TUI flicker."""
-        buf = ""
-        last_write = time.monotonic()
-        FLUSH_DELAY = 0.03  # 30ms batch window
-
+        """Poll PTY output and feed into pyte virtual terminal."""
         while self._running:
             if not self._pty or not self._pty.isalive():
                 break
@@ -359,26 +356,47 @@ class PtyWrapper:
                 break
 
             if text:
-                buf += text
-                # Feed into pyte immediately (it handles ANSI correctly)
                 with self._screen_lock:
                     self._stream.feed(text)
-
-            now = time.monotonic()
-            # Flush to stdout after batch window or when idle
-            if buf and (now - last_write >= FLUSH_DELAY or not text):
-                try:
-                    display = DA_RE.sub("", buf)
-                    if display:
-                        sys.stdout.write(display)
-                        sys.stdout.flush()
-                except OSError:
-                    pass
-                buf = ""
-                last_write = now
-
-            if not text:
+            else:
                 time.sleep(PTY_READ_INTERVAL)
+
+    def _display_thread(self):
+        """Render pyte screen to local terminal periodically."""
+        RENDER_INTERVAL = 0.1  # 100ms refresh rate
+        last_render = ""
+
+        while self._running:
+            time.sleep(RENDER_INTERVAL)
+
+            with self._screen_lock:
+                lines = []
+                for row in range(self._screen.lines):
+                    line = self._screen.buffer[row]
+                    chars = []
+                    for col in range(self._screen.columns):
+                        chars.append(line[col].data)
+                    lines.append("".join(chars).rstrip())
+                # Include cursor position
+                cursor_row = self._screen.cursor.y
+                cursor_col = self._screen.cursor.x
+                render = "\n".join(lines)
+
+            if render == last_render:
+                continue
+            last_render = render
+
+            # Clear screen and redraw from pyte buffer
+            try:
+                sys.stdout.write("\x1b[H")  # Move cursor to top-left
+                for i, line in enumerate(lines):
+                    clean = DA_RE.sub("", line)
+                    sys.stdout.write(f"\x1b[{i+1};1H\x1b[2K{clean}")
+                # Position cursor where pyte says it should be
+                sys.stdout.write(f"\x1b[{cursor_row+1};{cursor_col+1}H")
+                sys.stdout.flush()
+            except OSError:
+                pass
 
     # ── Screen snapshot → TCP broadcast ──
 

@@ -66,9 +66,15 @@ def main() -> None:
     app = bot.build_application()
 
     # Send startup notification
+    import html as _html
+    from telegram.constants import ParseMode
     session_names = list(sessions.keys())
     session_count = len(session_names)
-    startup_msg = f"봇 기동됨 ({session_count}개 세션)\n활성: {', '.join(session_names) or '없음'}"
+    names_str = ", ".join(_html.escape(n) for n in session_names) if session_names else "없음"
+    startup_msg = (
+        f"🟢 <b>봇 시작</b>  —  {session_count}개 세션\n\n"
+        f"  📡  {names_str}"
+    )
 
     async def post_init(application) -> None:
         from telegram import BotCommand
@@ -84,7 +90,8 @@ def main() -> None:
         ])
         for uid in settings.get_allowed_users():
             try:
-                await application.bot.send_message(chat_id=uid, text=startup_msg)
+                await application.bot.send_message(
+                    chat_id=uid, text=startup_msg, parse_mode=ParseMode.HTML)
             except Exception:
                 log.warning("기동 알림 전송 실패: %s", uid)
 
@@ -98,22 +105,26 @@ def main() -> None:
                     total = len(all_sessions)
 
                     if new_projects:
-                        names = ", ".join(new_projects)
-                        msg = f"새 세션 감지: {names}\n전체: {total}개 세션"
+                        names = ", ".join(
+                            f"<b>{_html.escape(n)}</b>" for n in new_projects)
+                        msg = f"🟢 새 세션  {names}\n  📡 전체 {total}개"
                         for uid in settings.get_allowed_users():
                             try:
                                 await application.bot.send_message(
-                                    chat_id=uid, text=msg)
+                                    chat_id=uid, text=msg,
+                                    parse_mode=ParseMode.HTML)
                             except Exception:
                                 pass
 
                     if removed_projects:
-                        names = ", ".join(removed_projects)
-                        msg = f"세션 종료: {names}\n전체: {total}개 세션"
+                        names = ", ".join(
+                            f"<b>{_html.escape(n)}</b>" for n in removed_projects)
+                        msg = f"🔴 세션 종료  {names}\n  📡 전체 {total}개"
                         for uid in settings.get_allowed_users():
                             try:
                                 await application.bot.send_message(
-                                    chat_id=uid, text=msg)
+                                    chat_id=uid, text=msg,
+                                    parse_mode=ParseMode.HTML)
                             except Exception:
                                 pass
                 except Exception:

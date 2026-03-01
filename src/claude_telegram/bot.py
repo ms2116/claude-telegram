@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from telegram import LinkPreviewOptions, Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -94,34 +94,45 @@ class Bot:
 
     # --- Command Handlers ---
 
+    async def _reply_html(self, update: Update, text: str) -> None:
+        """Send HTML-formatted reply."""
+        await update.message.reply_text(  # type: ignore[union-attr]
+            text, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW,
+        )
+
     async def cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
         sessions = self.claude.get_all_sessions()
-        session_list = ", ".join(sessions.keys()) if sessions else "none"
         current = self._get_project(user.id)
-        current_name = os.path.basename(current) if current else "none"
-        await update.message.reply_text(  # type: ignore[union-attr]
-            f"Claude Code 텔레그램 봇\n\n"
-            f"현재 프로젝트: {current_name}\n"
-            f"tmux 세션: {session_list}\n\n"
-            f"/help 로 명령어 확인",
+        current_name = _escape(os.path.basename(current)) if current else "—"
+        session_names = [_escape(n) for n in sessions.keys()]
+        session_str = ", ".join(session_names) if session_names else "없음"
+        await self._reply_html(update,
+            f"<b>Claude Code Telegram</b>\n\n"
+            f"  📂  현재 프로젝트  <b>{current_name}</b>\n"
+            f"  📡  활성 세션  <code>{session_str}</code>\n\n"
+            f"  /help 로 명령어 확인",
         )
 
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not self._is_allowed(update.effective_user.id):
             return
-        await update.message.reply_text(  # type: ignore[union-attr]
-            "메시지를 보내면 현재 프로젝트의 Claude에 전달됩니다\n\n"
-            "/project <이름> — 프로젝트 전환\n"
-            "/projects — 전체 프로젝트 목록\n"
-            "/1, /2, ... — 번호로 프로젝트 전환\n"
-            "/new — 새 대화 시작\n"
-            "/stop — Ctrl+C (작업 중단)\n"
-            "/esc — Escape 전송\n"
-            "/yes — 권한 승인 (y + Enter)\n"
-            "/status — 현재 상태 확인",
+        await self._reply_html(update,
+            "<b>명령어</b>\n\n"
+            "<b>프로젝트</b>\n"
+            "  /projects  전체 목록\n"
+            "  /1 /2 …  번호로 전환\n"
+            "  /project &lt;이름&gt;  이름으로 전환\n\n"
+            "<b>대화</b>\n"
+            "  /new  새 대화 시작\n"
+            "  /stop  작업 중단\n"
+            "  /esc  Escape 전송\n"
+            "  /yes  권한 승인\n\n"
+            "<b>상태</b>\n"
+            "  /status  세션 상태 확인\n\n"
+            "<i>메시지를 보내면 현재 프로젝트의 Claude에 전달됩니다</i>",
         )
 
     async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -131,24 +142,22 @@ class Bot:
             return
         project = self._get_project(user.id)
         if not project:
-            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⚠️ 활성 프로젝트가 없습니다")
             return
-        # tmux: Ctrl+C 직접 전송
         session = self.claude.get_session(user.id, project)
         if session:
             try:
                 import subprocess
                 subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "C-c"], timeout=5)
-                await update.message.reply_text("Ctrl+C 전송됨 (작업 중단)")  # type: ignore[union-attr]
+                await self._reply_html(update, "⏹ <b>작업 중단</b>")
                 return
             except Exception:
                 pass
-        # SDK: interrupt
         interrupted = await self.claude.interrupt_session(user.id, project)
         if interrupted:
-            await update.message.reply_text("작업을 중단했습니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⏹ <b>작업 중단</b>")
         else:
-            await update.message.reply_text("실행 중인 작업이 없습니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⚠️ 실행 중인 작업이 없습니다")
 
     async def cmd_esc(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Escape 키 전송 (tmux 전용)."""
@@ -157,15 +166,15 @@ class Bot:
             return
         project = self._get_project(user.id)
         if not project:
-            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⚠️ 활성 프로젝트가 없습니다")
             return
         session = self.claude.get_session(user.id, project)
         if session:
             import subprocess
             subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "Escape"], timeout=5)
-            await update.message.reply_text("Escape 전송됨")  # type: ignore[union-attr]
+            await self._reply_html(update, "⎋ <b>Escape 전송</b>")
         else:
-            await update.message.reply_text("tmux 세션이 아닙니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⚠️ tmux 세션이 없습니다")
 
     async def cmd_yes(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """권한 승인 — y + Enter 전송 (tmux 전용)."""
@@ -174,7 +183,7 @@ class Bot:
             return
         project = self._get_project(user.id)
         if not project:
-            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⚠️ 활성 프로젝트가 없습니다")
             return
         session = self.claude.get_session(user.id, project)
         if session:
@@ -182,9 +191,9 @@ class Bot:
             subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "y"], timeout=5)
             await asyncio.sleep(0.1)
             subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "Enter"], timeout=5)
-            await update.message.reply_text("승인(y) 전송됨")  # type: ignore[union-attr]
+            await self._reply_html(update, "✅ <b>승인 전송</b>")
         else:
-            await update.message.reply_text("tmux 세션이 아닙니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⚠️ tmux 세션이 없습니다")
 
     async def cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -192,7 +201,7 @@ class Bot:
             return
         project = self._get_project(user.id)
         if not project:
-            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⚠️ 활성 프로젝트가 없습니다")
             return
 
         session = self.claude.get_session(user.id, project)
@@ -200,12 +209,12 @@ class Bot:
             try:
                 from .claude import send_to_tmux
                 await send_to_tmux(session.info.pane_id, "/new")
-                await update.message.reply_text("새 대화를 시작했습니다.")  # type: ignore[union-attr]
+                await self._reply_html(update, "🔄 <b>새 대화 시작</b>")
             except Exception:
                 log.warning("Failed to send /new", exc_info=True)
-                await update.message.reply_text("/new 전송 실패.")  # type: ignore[union-attr]
+                await self._reply_html(update, "❌ /new 전송 실패")
         else:
-            await update.message.reply_text("tmux 세션이 없습니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⚠️ tmux 세션이 없습니다")
 
     async def cmd_project(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -214,8 +223,7 @@ class Bot:
         args = (update.message.text or "").split(maxsplit=1)  # type: ignore[union-attr]
         if len(args) < 2:
             current = self._get_project(user.id)
-            # Show tmux session name if possible
-            current_name = "none"
+            current_name = "—"
             if current:
                 for name, info in self.claude.get_all_sessions().items():
                     if info.work_dir == current or name == current:
@@ -223,25 +231,27 @@ class Bot:
                         break
                 else:
                     current_name = os.path.basename(current)
-            await update.message.reply_text(f"현재: {current_name}\n사용법: /project <이름>")  # type: ignore[union-attr]
+            await self._reply_html(update,
+                f"📂 현재  <b>{_escape(current_name)}</b>\n\n"
+                f"<i>/project &lt;이름&gt; 으로 전환</i>")
             return
         target = args[1].strip()
-        # Match by tmux session name or work_dir
         self.claude.refresh()
         sessions = self.claude.get_all_sessions()
         for name, info in sessions.items():
             if target.lower() in (name.lower(), os.path.basename(info.work_dir).lower()):
                 self._user_projects[user.id] = info.work_dir or name
-                await update.message.reply_text(f"{name} (tmux)로 전환했습니다")  # type: ignore[union-attr]
+                await self._reply_html(update, f"📂 <b>{_escape(name)}</b> 으로 전환")
                 return
-        # Partial match in tmux sessions
         for name, info in sessions.items():
             if target.lower() in name.lower():
                 self._user_projects[user.id] = info.work_dir or name
-                await update.message.reply_text(f"{name} (tmux)로 전환했습니다")  # type: ignore[union-attr]
+                await self._reply_html(update, f"📂 <b>{_escape(name)}</b> 으로 전환")
                 return
-        available = list(sessions.keys())
-        await update.message.reply_text(f"'{target}' 을(를) 찾을 수 없습니다\n활성 세션: {available or '없음'}")  # type: ignore[union-attr]
+        names = [_escape(n) for n in sessions.keys()]
+        await self._reply_html(update,
+            f"⚠️ <code>{_escape(target)}</code> 을(를) 찾을 수 없습니다\n\n"
+            f"활성 세션: {', '.join(names) or '없음'}")
 
     def _build_project_list(self) -> list[tuple[int, str, str, bool]]:
         """Build numbered project list: (num, name, work_dir, is_tmux).
@@ -266,10 +276,9 @@ class Bot:
         return result
 
     def _switch_project(self, user_id: int, name: str, work_dir: str, is_tmux: bool) -> str:
-        """Switch user's active project. Returns confirmation message."""
+        """Switch user's active project. Returns HTML confirmation message."""
         self._user_projects[user_id] = work_dir or name
-        mode = "tmux" if is_tmux else "sdk"
-        return f"{name} ({mode})로 전환했습니다"
+        return f"📂 <b>{_escape(name)}</b> 으로 전환"
 
     async def cmd_projects(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -280,15 +289,15 @@ class Bot:
         current_base = os.path.basename(current.rstrip("/")) if current else ""
         projects = self._build_project_list()
         if not projects:
-            await update.message.reply_text("세션/프로젝트가 없습니다.")  # type: ignore[union-attr]
+            await self._reply_html(update, "⚠️ 등록된 프로젝트가 없습니다")
             return
-        lines = []
+        lines = ["<b>프로젝트 목록</b>\n"]
         for num, name, work_dir, is_tmux in projects:
-            cur = " *" if name == current_base else ""
-            dot = "●" if is_tmux else "○"
-            lines.append(f"/{num} {dot} {name}{cur}")
-        lines.append(f"\n● 활성  ○ 비활성\n번호로 전환: /1, /2, ...")
-        await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
+            dot = "●" if is_tmux else "◦"
+            cur = "  ◀" if name == current_base else ""
+            lines.append(f"  /{num}  {dot}  {_escape(name)}{cur}")
+        lines.append(f"\n<i>● 활성  ◦ 비활성  ◀ 현재</i>")
+        await self._reply_html(update, "\n".join(lines))
 
     async def cmd_switch_by_number(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /1, /2, ... commands to switch project by number."""
@@ -305,9 +314,9 @@ class Bot:
         for pnum, name, work_dir, is_tmux in projects:
             if pnum == num:
                 msg = self._switch_project(user.id, name, work_dir, is_tmux)
-                await update.message.reply_text(msg)  # type: ignore[union-attr]
+                await self._reply_html(update, msg)
                 return
-        await update.message.reply_text(f"/{num} — 없는 번호입니다. /projects로 확인하세요.")  # type: ignore[union-attr]
+        await self._reply_html(update, f"⚠️ /{num} — 없는 번호입니다\n/projects 로 확인하세요")
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -318,16 +327,18 @@ class Bot:
         running = self.claude.get_active_projects(user.id)
         current = self._get_project(user.id)
 
-        lines = [f"세션: {len(sessions)}개"]
+        lines = [f"<b>세션 상태</b>  —  {len(sessions)}개\n"]
         for name, info in sessions.items():
             is_current = current and (name == os.path.basename(current.rstrip("/")))
             is_running = info.project in running
-            marker = " [현재]" if is_current else ""
-            status = " (실행중)" if is_running else ""
-            lines.append(f"  {name}{marker}{status} — {info.pane_id}")
+            cur = "  ◀" if is_current else ""
+            dot = "▶" if is_running else "●"
+            lines.append(f"  {dot}  <b>{_escape(name)}</b>  "
+                         f"<code>{_escape(info.pane_id)}</code>{cur}")
         if not sessions:
-            lines.append("  tmux 세션 없음")
-        await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
+            lines.append("  <i>활성 세션 없음</i>")
+        lines.append(f"\n<i>● 대기  ▶ 실행중  ◀ 현재</i>")
+        await self._reply_html(update, "\n".join(lines))
 
     # --- Message Handler ---
 
@@ -339,7 +350,9 @@ class Bot:
 
         project = self._get_project(user.id)
         if not project:
-            await msg.reply_text("프로젝트 미설정. .env에 CT_PROJECT_DIRS를 설정하세요.")
+            await msg.reply_text(
+                "⚠️ 프로젝트 미설정\n\n<i>.env에 CT_PROJECT_DIRS를 설정하세요</i>",
+                parse_mode=ParseMode.HTML)
             return
 
         log.info("Message from %s → project %s", user.id, project)
@@ -351,7 +364,7 @@ class Bot:
 
         # Send typing indicator and placeholder message
         await ctx.bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
-        reply = await msg.reply_text("처리중...")
+        reply = await msg.reply_text("⏳")
 
         # Stream callback — receives full text each time, replaces display
         current_text = [""]  # mutable holder for latest full text
@@ -394,7 +407,7 @@ class Bot:
             result_text = result.text.strip() if result.text else ""
             display_text = streamed if len(streamed) >= len(result_text) else result_text
             if not display_text:
-                display_text = "(텍스트 응답 없음 — 도구 실행됨)"
+                display_text = "⚙️ 도구 실행 완료 (텍스트 응답 없음)"
 
             # Send final message (edit = silent)
             if display_text:
@@ -414,12 +427,14 @@ class Bot:
                         pass
 
             # Completion notification (new message = triggers sound)
-            await msg.reply_text("완료")
+            await msg.reply_text("✅ 완료")
 
         except Exception as e:
             log.exception("Error processing message")
             try:
-                await reply.edit_text(f"Error: {_escape(str(e)[:500])}")
+                await reply.edit_text(
+                    f"❌ <b>오류</b>\n\n<code>{_escape(str(e)[:500])}</code>",
+                    parse_mode=ParseMode.HTML)
             except Exception:
                 pass
 

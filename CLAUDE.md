@@ -23,7 +23,9 @@ Claude Code 세션을 텔레그램으로 제어하는 봇. tmux 우선, SDK 폴�
 - **`extract_response`**: `user_msg[:15]`로 짧게 검색 (한글 tmux 줄바꿈 대응), 앵커 폴백
 - **`_is_spinner_line`**: `(` 위치로 tool call(`● Bash(cmd…)`) vs thinking(`✽ Thinking… (53s)`) 구분
 - **완료 알림**: edit은 무음, 완료 시 "완료" 새 메시지 전송 (알림 소리)
-- **세션 lifecycle**: SessionStart/SessionEnd hook으로 자동 기동/종료
+- **세션 lifecycle**: SessionStart/SessionEnd hook → 세션 파일 생성/삭제 → 30초 watcher가 감지 → 텔레그램 알림
+- **프로젝트 번호**: `/projects`에서 번호 목록 (● 활성 ○ 비활성), `/1` `/2`로 빠른 전환
+- **hook 설정**: `~/.claude/settings.json`에 `"matcher": ""` + `"command": "bash ..."` 형식
 
 ## 실행
 

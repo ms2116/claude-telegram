@@ -371,6 +371,172 @@ class ClaudeManager:
             except Exception as e:
                 log.warning("Failed to parse session file %s: %s", f, e)
 
+    def scan_tmux_panes(self) -> list[str]:
+        """Scan all tmux panes for Claude Code sessions and auto-register.
+
+        Returns list of newly added project names.
+        Heavy operation — use only at startup.
+        """
+        new_projects: list[str] = []
+        try:
+            r = subprocess.run(
+                ["tmux", "list-panes", "-a", "-F",
+                 "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0:
+                return new_projects
+
+            known_panes = {s.info.pane_id for s in self._sessions.values()}
+
+            for line in r.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+                pane_id, work_dir, cmd = parts[0], parts[1], parts[2]
+
+                if pane_id in known_panes:
+                    continue
+
+                # Check if this pane runs Claude Code
+                if cmd not in ("claude", "node"):
+                    continue
+                # Verify by capturing pane content
+                content = capture_pane(pane_id, lines=50)
+                cleaned = strip_ansi(content)
+                if "Claude Code" not in cleaned and "❯" not in cleaned:
+                    continue
+
+                project = os.path.basename(work_dir.rstrip("/"))
+                if project in self._sessions:
+                    continue
+
+                # Register
+                info = SessionInfo(project=project, pane_id=pane_id, work_dir=work_dir)
+                self._sessions[project] = TmuxSession(info)
+                new_projects.append(project)
+                log.info("Auto-detected Claude session: %s (pane %s, dir %s)",
+                         project, pane_id, work_dir)
+
+                # Save to session dir for persistence
+                SESSION_DIR.mkdir(parents=True, exist_ok=True)
+                session_file = SESSION_DIR / f"{project}.json"
+                session_file.write_text(json.dumps({
+                    "project": project,
+                    "pane_id": pane_id,
+                    "work_dir": work_dir,
+                    "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                }))
+        except Exception:
+            log.exception("Error scanning tmux panes")
+
+        # Also clean dead sessions
+        self._clean_dead_sessions()
+
+        return new_projects
+
+    def check_new_sessions(self) -> tuple[list[str], list[str]]:
+        """Check /tmp/claude_sessions/ for new/removed session files.
+
+        Called periodically instead of heavy tmux scan.
+        Returns (new_projects, removed_projects).
+        """
+        new_projects: list[str] = []
+        removed_projects: list[str] = []
+
+        if not SESSION_DIR.exists():
+            return new_projects, removed_projects
+
+        known = set(self._sessions.keys())
+        # Files currently on disk
+        disk_projects: set[str] = set()
+
+        for f in SESSION_DIR.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                project = data["project"]
+                disk_projects.add(project)
+
+                if project in known:
+                    continue
+
+                pane_id = data.get("pane_id", "unknown")
+
+                # Resolve "unknown" pane by scanning tmux
+                if pane_id == "unknown":
+                    pane_id = self._find_pane_for_dir(data.get("work_dir", ""))
+                    if pane_id:
+                        data["pane_id"] = pane_id
+                        f.write_text(json.dumps(data))
+                    else:
+                        log.debug("Session %s pane unknown and not found in tmux", project)
+                        continue
+
+                if not _is_pane_alive(pane_id):
+                    log.info("Session %s pane %s dead — removing", project, pane_id)
+                    f.unlink(missing_ok=True)
+                    disk_projects.discard(project)
+                    continue
+
+                info = SessionInfo(
+                    project=project,
+                    pane_id=pane_id,
+                    work_dir=data.get("work_dir", ""),
+                )
+                self._sessions[project] = TmuxSession(info)
+                new_projects.append(project)
+                log.info("New session from hook: %s (pane %s)", project, pane_id)
+            except Exception as e:
+                log.warning("Failed to parse session file %s: %s", f, e)
+
+        # Detect removed sessions (file deleted by unregister hook)
+        for name in list(known):
+            if name.startswith("sdk:"):
+                continue
+            if name not in disk_projects:
+                del self._sessions[name]
+                removed_projects.append(name)
+                log.info("Session ended (hook): %s", name)
+
+        return new_projects, removed_projects
+
+    def _find_pane_for_dir(self, work_dir: str) -> str | None:
+        """Find a tmux pane running Claude in the given directory."""
+        if not work_dir:
+            return None
+        try:
+            r = subprocess.run(
+                ["tmux", "list-panes", "-a", "-F",
+                 "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0:
+                return None
+            for line in r.stdout.strip().split("\n"):
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+                pane_id, pdir, cmd = parts[0], parts[1], parts[2]
+                if pdir.rstrip("/") == work_dir.rstrip("/") and cmd in ("claude", "node"):
+                    return pane_id
+        except Exception:
+            pass
+        return None
+
+    def _clean_dead_sessions(self) -> None:
+        """Remove sessions whose tmux pane is no longer alive."""
+        dead = []
+        for name, s in self._sessions.items():
+            if not name.startswith("sdk:") and not _is_pane_alive(s.info.pane_id):
+                dead.append(name)
+        for name in dead:
+            del self._sessions[name]
+            f = SESSION_DIR / f"{name}.json"
+            f.unlink(missing_ok=True)
+            log.info("Removed dead session: %s", name)
+
     def refresh(self) -> None:
         """Reload sessions from registry."""
         self.load_sessions()

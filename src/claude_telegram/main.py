@@ -13,6 +13,8 @@ from .store import Store
 
 log = logging.getLogger("claude_telegram")
 
+SESSION_CHECK_INTERVAL = 30  # seconds between session file checks
+
 
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
@@ -52,14 +54,14 @@ def main() -> None:
     store = asyncio.run(_init_store(settings))
     log.info("Database: %s", settings.get_db_path())
 
-    # Initialize Claude manager — load tmux sessions
+    # Initialize Claude manager — load tmux sessions + scan
     claude = ClaudeManager(settings)
     claude.load_sessions()
+    claude.scan_tmux_panes()
     sessions = claude.get_all_sessions()
     log.info("Tmux sessions: %s", list(sessions.keys()) or "none")
 
     # Build and run bot
-    # run_polling handles its own event loop, signals, and graceful shutdown
     bot = Bot(settings, claude, store)
     app = bot.build_application()
 
@@ -86,6 +88,39 @@ def main() -> None:
                 await application.bot.send_message(chat_id=uid, text=startup_msg)
             except Exception:
                 log.warning("기동 알림 전송 실패: %s", uid)
+
+        # Background watcher — detect new/removed sessions from hooks
+        async def _session_watcher() -> None:
+            while True:
+                await asyncio.sleep(SESSION_CHECK_INTERVAL)
+                try:
+                    new_projects, removed_projects = claude.check_new_sessions()
+                    all_sessions = claude.get_all_sessions()
+                    total = len(all_sessions)
+
+                    if new_projects:
+                        names = ", ".join(new_projects)
+                        msg = f"새 세션 감지: {names}\n전체: {total}개 세션"
+                        for uid in settings.get_allowed_users():
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=uid, text=msg)
+                            except Exception:
+                                pass
+
+                    if removed_projects:
+                        names = ", ".join(removed_projects)
+                        msg = f"세션 종료: {names}\n전체: {total}개 세션"
+                        for uid in settings.get_allowed_users():
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=uid, text=msg)
+                            except Exception:
+                                pass
+                except Exception:
+                    log.exception("Session watcher error")
+
+        asyncio.get_event_loop().create_task(_session_watcher())
 
     app.post_init = post_init
 

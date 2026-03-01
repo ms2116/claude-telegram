@@ -8,8 +8,8 @@ tmux 세션에 직접 연결하여 중간 도구 실행 과정까지 실시간�
 
 - **실시간 스트리밍** — Claude의 도구 실행 과정(`● Bash(...)`, `⎿ 결과`)을 텔레그램에서 실시간 확인
 - **하이브리드 연결** — tmux `capture-pane` 우선, SDK `resume` 폴백
-- **자동 기동** — Claude Code 세션 시작 시 봇 자동 시작 (SessionStart hook)
-- **다중 프로젝트** — `/project`로 전환, 동시 실행 가능
+- **자동 세션 감지** — SessionStart/End hook으로 세션 자동 등록/해제 + 텔레그램 알림
+- **다중 프로젝트** — `/projects`로 번호 목록 확인, `/1` `/2`로 빠른 전환, 활성(●)/비활성(○) 표시
 - **세션 이어하기** — `/session`으로 이전 세션 선택 및 resume
 - **완료 알림** — 작업 완료 시 별도 알림 메시지 (소리)
 - **링크 프리뷰 비활성화** — URL 포함 응답에서 프리뷰 노이즈 제거
@@ -20,7 +20,8 @@ tmux 세션에 직접 연결하여 중간 도구 실행 과정까지 실시간�
 | 명령어 | 설명 |
 |--------|------|
 | `/project <이름>` | 프로젝트 전환 |
-| `/projects` | 전체 프로젝트 목록 |
+| `/projects` | 번호 목록 (● 활성 ○ 비활성) |
+| `/1`, `/2`, ... | 번호로 프로젝트 전환 |
 | `/session [번호]` | 이전 세션 선택 |
 | `/new` | 새 대화 시작 |
 | `/stop` | Ctrl+C — 작업 중단 |
@@ -61,16 +62,28 @@ bash run.sh
 
 ## 자동 기동 (SessionStart hook)
 
-`~/.claude/settings.local.json`에 hook 등록하면 Claude Code 세션 시작/종료 시 봇 자동 관리:
+`~/.claude/settings.json`에 hook 등록하면 Claude Code 세션 시작/종료 시 봇 자동 관리:
 
 ```json
 {
   "hooks": {
-    "SessionStart": [{"hooks": [{"type": "command", "command": "/path/to/register-session.sh"}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "/path/to/unregister-session.sh"}]}]
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "bash /path/to/register-session.sh"}]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "bash /path/to/unregister-session.sh"}]
+      }
+    ]
   }
 }
 ```
+
+> **주의**: `settings.local.json`이 아닌 `settings.json`에 등록해야 함. `"matcher": ""`와 `bash` 명시 필수.
 
 ## 구조
 

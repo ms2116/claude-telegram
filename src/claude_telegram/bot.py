@@ -285,33 +285,72 @@ class Bot:
         available = list(sessions.keys()) + [os.path.basename(d) for d in self.settings.get_project_dirs()]
         await update.message.reply_text(f"'{target}' 을(를) 찾을 수 없습니다\n목록: {available}")  # type: ignore[union-attr]
 
+    def _build_project_list(self) -> list[tuple[int, str, str, bool]]:
+        """Build numbered project list: (num, name, source, is_tmux).
+
+        Active tmux sessions first, then SDK-only projects.
+        Numbers are stable per session (rebuilt on each call).
+        """
+        result: list[tuple[int, str, str, bool]] = []
+        tmux_sessions = self.claude.get_all_sessions()
+        tmux_dirs: set[str] = set()
+        num = 1
+        for name, info in tmux_sessions.items():
+            if name.startswith("sdk:"):
+                continue
+            result.append((num, name, info.work_dir, True))
+            tmux_dirs.add(info.work_dir)
+            num += 1
+        # SDK-only projects from env
+        for d in self.settings.get_project_dirs():
+            if d not in tmux_dirs:
+                result.append((num, os.path.basename(d), d, False))
+                num += 1
+        return result
+
+    def _switch_project(self, user_id: int, name: str, work_dir: str, is_tmux: bool) -> str:
+        """Switch user's active project. Returns confirmation message."""
+        self._user_projects[user_id] = work_dir or name
+        mode = "tmux" if is_tmux else "sdk"
+        return f"{name} ({mode})로 전환했습니다"
+
     async def cmd_projects(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
         self.claude.refresh()
-        tmux_sessions = self.claude.get_all_sessions()
         current = self._get_project(user.id)
         current_base = os.path.basename(current.rstrip("/")) if current else ""
+        projects = self._build_project_list()
+        if not projects:
+            await update.message.reply_text("세션/프로젝트가 없습니다.")  # type: ignore[union-attr]
+            return
         lines = []
-        # Tmux sessions
-        if tmux_sessions:
-            lines.append("tmux:")
-            for name, info in tmux_sessions.items():
-                marker = " *" if name == current_base else ""
-                lines.append(f"  {name}{marker} — {info.pane_id}")
-        # SDK projects (from CT_PROJECT_DIRS, excluding those already in tmux)
-        tmux_dirs = {info.work_dir for info in tmux_sessions.values()}
-        sdk_dirs = [d for d in self.settings.get_project_dirs() if d not in tmux_dirs]
-        if sdk_dirs:
-            lines.append("sdk:")
-            for d in sdk_dirs:
-                name = os.path.basename(d)
-                marker = " *" if name == current_base else ""
-                lines.append(f"  {name}{marker} — {d}")
-        if not lines:
-            lines.append("세션/프로젝트가 없습니다.")
+        for num, name, work_dir, is_tmux in projects:
+            cur = " *" if name == current_base else ""
+            dot = "●" if is_tmux else "○"
+            lines.append(f"/{num} {dot} {name}{cur}")
+        lines.append(f"\n● 활성  ○ 비활성\n번호로 전환: /1, /2, ...")
         await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
+
+    async def cmd_switch_by_number(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /1, /2, ... commands to switch project by number."""
+        user = update.effective_user
+        if not user or not self._is_allowed(user.id):
+            return
+        text = (update.message.text or "").strip()  # type: ignore[union-attr]
+        try:
+            num = int(text.lstrip("/"))
+        except ValueError:
+            return
+        self.claude.refresh()
+        projects = self._build_project_list()
+        for pnum, name, work_dir, is_tmux in projects:
+            if pnum == num:
+                msg = self._switch_project(user.id, name, work_dir, is_tmux)
+                await update.message.reply_text(msg)  # type: ignore[union-attr]
+                return
+        await update.message.reply_text(f"/{num} — 없는 번호입니다. /projects로 확인하세요.")  # type: ignore[union-attr]
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -554,6 +593,9 @@ class Bot:
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("session", self.cmd_session))
         app.add_handler(CommandHandler("refresh", self.cmd_refresh))
+        # Number shortcuts: /1, /2, ... /20 for quick project switch
+        for n in range(1, 21):
+            app.add_handler(CommandHandler(str(n), self.cmd_switch_by_number))
         # Messages (text, documents, photos)
         app.add_handler(
             MessageHandler(

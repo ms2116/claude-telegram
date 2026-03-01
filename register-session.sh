@@ -18,10 +18,15 @@ if [ $# -ge 3 ]; then
 else
     WORK_DIR="${PWD}"
     PROJECT=$(basename "$(git -C "$WORK_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$WORK_DIR")")
+
+    # pane ID 감지: $TMUX_PANE → tmux display-message 폴백
     PANE_ID="${TMUX_PANE:-}"
+    if [ -z "$PANE_ID" ] && [ -n "${TMUX:-}" ]; then
+        PANE_ID=$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)
+    fi
     if [ -z "$PANE_ID" ]; then
-        # tmux 밖에서 호출 — 세션만 등록하지 않음
-        exit 0
+        # tmux 밖 — pane 없이 세션만 등록
+        PANE_ID="unknown"
     fi
 fi
 
@@ -32,13 +37,16 @@ cat > "$SESSION_DIR/$PROJECT.json" <<EOF
 EOF
 echo "세션 등록: $PROJECT (pane=$PANE_ID)"
 
-# 봇이 안 떠있으면 자동 기동
+# 봇이 안 떠있으면 자동 기동 (PID파일 또는 프로세스명으로 감지)
 bot_running=false
 if [ -f "$LOCK_FILE" ]; then
     old_pid=$(cat "$LOCK_FILE" 2>/dev/null)
     if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
         bot_running=true
     fi
+fi
+if [ "$bot_running" = false ] && pgrep -f 'claude-telegram' > /dev/null 2>&1; then
+    bot_running=true
 fi
 
 if [ "$bot_running" = false ]; then

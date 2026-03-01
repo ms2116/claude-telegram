@@ -8,6 +8,7 @@ dependencies = [
     "python-telegram-bot>=22.0",
     "pydantic-settings>=2.0",
     "aiosqlite>=0.20.0",
+    "claude-agent-sdk>=0.1.44",
 ]
 
 [project.optional-dependencies]

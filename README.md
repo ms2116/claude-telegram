@@ -1,89 +1,88 @@
 # claude-telegram
 
-Lightweight Telegram bot for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) via the official `claude-agent-sdk`.
+Claude Code 세션을 텔레그램으로 제어하는 봇.
 
-**5 files, ~1000 lines.** No tmux, no ANSI parsing, no subprocess hacks.
+tmux 세션에 직접 연결하여 중간 도구 실행 과정까지 실시간으로 확인 가능. SDK 폴백으로 tmux 없는 프로젝트도 지원.
 
-## Features
+## 주요 기능
 
-- **Streaming responses** — real-time message updates as Claude thinks
-- **Task cancellation** — `/stop` interrupts via SDK (cross-platform)
-- **Multi-project** — switch between projects with `/project`
-- **Concurrent execution** — different projects run in parallel
-- **Session memory** — `/new` summarizes & saves context for next session
-- **Cost tracking** — per-project cost breakdown via `/status`
-- **File upload** — send documents/images to Claude
-- **Crash recovery** — `run.sh` circuit breaker with exponential backoff + Telegram alerts
-- **Cross-platform** — Windows, WSL, Linux
+- **실시간 스트리밍** — Claude의 도구 실행 과정(`● Bash(...)`, `⎿ 결과`)을 텔레그램에서 실시간 확인
+- **하이브리드 연결** — tmux `capture-pane` 우선, SDK `resume` 폴백
+- **자동 기동** — Claude Code 세션 시작 시 봇 자동 시작 (SessionStart hook)
+- **다중 프로젝트** — `/project`로 전환, 동시 실행 가능
+- **세션 이어하기** — `/session`으로 이전 세션 선택 및 resume
+- **완료 알림** — 작업 완료 시 별도 알림 메시지 (소리)
+- **링크 프리뷰 비활성화** — URL 포함 응답에서 프리뷰 노이즈 제거
+- **자동 재시작** — `run.sh` circuit breaker (5회 크래시/60초 감지, 자동 복구)
 
-## Quick Start
+## 명령어
+
+| 명령어 | 설명 |
+|--------|------|
+| `/project <이름>` | 프로젝트 전환 |
+| `/projects` | 전체 프로젝트 목록 |
+| `/session [번호]` | 이전 세션 선택 |
+| `/new` | 새 대화 시작 |
+| `/stop` | Ctrl+C — 작업 중단 |
+| `/esc` | Escape 전송 |
+| `/yes` | 권한 승인 (y + Enter) |
+| `/status` | 현재 상태 확인 |
+| `/refresh` | tmux 세션 새로고침 |
+
+## 설치
 
 ```bash
-# Clone
 git clone https://github.com/ms2116/claude-telegram.git
 cd claude-telegram
-
-# Install (requires uv)
 uv sync
-
-# Configure
-cp .env.example .env
-# Edit .env: set CT_TELEGRAM_BOT_TOKEN, CT_ALLOWED_USERS, CT_PROJECT_DIRS
-
-# Run
-uv run claude-telegram
+cp .env.example .env  # 토큰, 유저ID, 프로젝트 경로 설정
 ```
 
-## Configuration
+## 설정 (.env)
 
-All settings via environment variables (prefix `CT_`) or `.env` file:
+| 변수 | 필수 | 설명 |
+|------|------|------|
+| `CT_TELEGRAM_BOT_TOKEN` | O | @BotFather에서 발급받은 토큰 |
+| `CT_ALLOWED_USERS` | - | 허용할 텔레그램 유저 ID (쉼표 구분) |
+| `CT_PROJECT_DIRS` | O | 프로젝트 디렉토리 목록 (쉼표 구분) |
+| `CT_PERMISSION_MODE` | - | `acceptEdits` (기본), `default`, `bypassPermissions` |
+| `CT_MODEL` | - | Claude 모델 지정 |
+| `CT_MAX_TURNS` | - | 쿼리당 최대 턴 (0 = 무제한) |
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `CT_TELEGRAM_BOT_TOKEN` | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
-| `CT_ALLOWED_USERS` | No | Comma-separated Telegram user IDs (empty = allow all) |
-| `CT_PROJECT_DIRS` | Yes | Comma-separated project directories |
-| `CT_PERMISSION_MODE` | No | `acceptEdits` (default), `default`, `bypassPermissions` |
-| `CT_ALLOWED_TOOLS` | No | Comma-separated tool names (empty = all) |
-| `CT_MODEL` | No | Claude model override |
-| `CT_MAX_TURNS` | No | Max turns per query (0 = unlimited) |
-| `CT_DB_PATH` | No | SQLite path (default: `~/.claude-telegram/store.db`) |
-| `CT_LOG_LEVEL` | No | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Welcome message |
-| `/help` | Show all commands |
-| `/stop` | Cancel running task |
-| `/new` | New session (saves memory from current) |
-| `/project <name>` | Switch active project |
-| `/projects` | List configured projects |
-| `/status` | Show active tasks & cost breakdown |
-
-## Production
-
-Use the circuit breaker wrapper:
+## 실행
 
 ```bash
-# Optional: set alert chat ID for crash notifications
-export CT_ALERT_CHAT_ID=your_chat_id
+# 직접 실행
+uv run claude-telegram
 
+# 자동 재시작 (프로덕션)
 bash run.sh
 ```
 
-## Architecture
+## 자동 기동 (SessionStart hook)
+
+`~/.claude/settings.local.json`에 hook 등록하면 Claude Code 세션 시작/종료 시 봇 자동 관리:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "/path/to/register-session.sh"}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "/path/to/unregister-session.sh"}]}]
+  }
+}
+```
+
+## 구조
 
 ```
 src/claude_telegram/
-├── config.py    # pydantic-settings, env prefix CT_
-├── claude.py    # ClaudeSession + ClaudeManager (SDK wrapper)
-├── bot.py       # Telegram handlers, streaming edits
-├── store.py     # SQLite: sessions, memories, cost
-└── main.py      # Entrypoint, graceful shutdown
+├── config.py    # 환경변수 설정 (CT_ prefix)
+├── claude.py    # TmuxSession + SDKSession + ClaudeManager
+├── bot.py       # 텔레그램 핸들러, 스트리밍
+├── store.py     # SQLite: 세션, 메모리
+└── main.py      # 엔트리포인트
 ```
 
-## License
+## 라이선스
 
 MIT

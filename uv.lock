@@ -166,13 +166,20 @@ dependencies = [
     { name = "python-telegram-bot" },
 ]
 
+[package.optional-dependencies]
+sdk = [
+    { name = "claude-agent-sdk" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
-    { name = "claude-agent-sdk", specifier = ">=0.1.39" },
+    { name = "claude-agent-sdk", specifier = ">=0.1.44" },
+    { name = "claude-agent-sdk", marker = "extra == 'sdk'", specifier = ">=0.1.39" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "python-telegram-bot", specifier = ">=22.0" },
 ]
+provides-extras = ["sdk"]
 
 [[package]]
 name = "click"

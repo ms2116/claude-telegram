@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from telegram import Update
+from telegram import LinkPreviewOptions, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
@@ -32,6 +32,8 @@ log = logging.getLogger(__name__)
 TG_MAX_LEN = 4096
 # Minimum interval between message edits (seconds)
 EDIT_THROTTLE = 2.0
+# Disable link previews globally
+NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
 def _truncate(text: str, limit: int = TG_MAX_LEN - 100) -> str:
@@ -418,28 +420,27 @@ class Bot:
         await ctx.bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
         reply = await msg.reply_text("처리중...")
 
-        # Stream callback — edit the reply message with accumulated text
-        accumulated: list[str] = []
+        # Stream callback — receives full text each time, replaces display
+        current_text = [""]  # mutable holder for latest full text
         last_edit = 0.0
         edit_lock = asyncio.Lock()
 
-        async def stream_cb(chunk: str, is_final: bool) -> None:
+        async def stream_cb(full_text: str, is_final: bool) -> None:
             nonlocal last_edit
-            if chunk:
-                accumulated.append(chunk)
+            if full_text:
+                current_text[0] = full_text
 
             now = time.monotonic()
             should_edit = is_final or (now - last_edit >= EDIT_THROTTLE)
-            if not should_edit or not accumulated:
+            if not should_edit or not current_text[0]:
                 return
 
             async with edit_lock:
-                full_text = "".join(accumulated)
-                if not full_text.strip():
+                if not current_text[0].strip():
                     return
-                display = _truncate(full_text)
+                display = _truncate(current_text[0])
                 try:
-                    await reply.edit_text(display)
+                    await reply.edit_text(display, link_preview_options=NO_PREVIEW)
                     last_edit = time.monotonic()
                 except Exception:
                     pass  # Telegram rate limit or message unchanged
@@ -455,24 +456,33 @@ class Bot:
             )
 
             # Build final display text
-            display_text = result.text.strip() if result.text else ""
-            if not display_text and not accumulated:
+            # Prefer streamed content (includes intermediate tool steps)
+            # Fall back to result.text (final extract_response)
+            streamed = current_text[0].strip()
+            result_text = result.text.strip() if result.text else ""
+            display_text = streamed if len(streamed) >= len(result_text) else result_text
+            if not display_text:
                 display_text = "(텍스트 응답 없음 — 도구 실행됨)"
 
-            # Send final message
+            # Send final message (edit = silent)
             if display_text:
                 if len(display_text) > TG_MAX_LEN - 100:
                     try:
                         await reply.delete()
                     except Exception:
                         pass
-                    for part in _split_message(display_text):
-                        await msg.reply_text(part)
+                    parts = _split_message(display_text)
+                    for part in parts:
+                        await msg.reply_text(part, link_preview_options=NO_PREVIEW,
+                                             disable_notification=True)
                 else:
                     try:
-                        await reply.edit_text(display_text)
+                        await reply.edit_text(display_text, link_preview_options=NO_PREVIEW)
                     except Exception:
                         pass
+
+            # Completion notification (new message = triggers sound)
+            await msg.reply_text("완료")
 
             # Log usage
             await self.store.update_session(

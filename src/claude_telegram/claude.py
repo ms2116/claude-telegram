@@ -46,7 +46,7 @@ TIMEOUT = 300            # max wait
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\(B")
 
 _PROCESSING_PREFIXES = (
-    "·", "✻", "✽", "✢", "*", "●", "○", "◐", "◑", "◒", "◓",
+    "·", "✻", "✽", "✢", "✶", "*", "●", "○", "◐", "◑", "◒", "◓",
     "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
 )
 
@@ -85,6 +85,10 @@ def _is_pane_alive(pane_id: str) -> bool:
 
 
 def _is_processing_line(stripped: str) -> bool:
+    """Detect any active processing line (spinners + running tools).
+
+    Used by is_claude_idle() to know Claude is still working.
+    """
     if "…" not in stripped:
         return False
     if len(stripped) > 80:
@@ -94,6 +98,34 @@ def _is_processing_line(stripped: str) -> bool:
     if stripped.startswith("⎿"):
         return False
     return any(stripped.startswith(p) for p in _PROCESSING_PREFIXES)
+
+
+def _is_spinner_line(stripped: str) -> bool:
+    """Detect spinner/thinking lines (NOT completed tool calls).
+
+    Used by extract_response() to filter transient noise while preserving
+    completed tool execution lines:
+      ● Bash(echo "test…")              ← tool call, ( before … → keep
+      ● Bash …                          ← spinner, no ( → filter
+      ✽ Philosophising… (53s · ↑ 144t)  ← thinking, ( after … → filter
+    """
+    if "…" not in stripped:
+        return False
+    if len(stripped) > 120:
+        return False
+    if any(s in stripped for s in ("ctrl+o", "shift+tab", "esc to")):
+        return False
+    if stripped.startswith("⎿"):
+        return False
+    if not any(stripped.startswith(p) for p in _PROCESSING_PREFIXES):
+        return False
+    # Tool calls: ● Bash(cmd…) — ( appears BEFORE …
+    # Thinking:   ✽ Thinking… (53s) — ( appears AFTER …
+    paren_idx = stripped.find("(")
+    ellipsis_idx = stripped.find("…")
+    if paren_idx >= 0 and paren_idx < ellipsis_idx:
+        return False  # tool call with truncated args → keep
+    return True
 
 
 def is_claude_idle(pane_content: str) -> bool:
@@ -128,28 +160,69 @@ def extract_response(before: str, after: str, user_msg: str) -> str:
     after_lines = after_clean.split("\n")
     new_content = ""
 
-    user_short = user_msg[:60].strip()
+    # Strategy 1: Find ❯ + user message start (short to handle tmux wrapping)
+    user_short = user_msg[:15].strip()
     for i, line in enumerate(after_lines):
         stripped = line.strip()
-        if stripped.startswith("❯") and user_short in stripped:
-            new_content = "\n".join(after_lines[i + 1:])
-            break
-        if user_short in line and i > len(after_lines) // 2:
-            new_content = "\n".join(after_lines[i + 1:])
+        if stripped.startswith("❯") and user_short and user_short in stripped:
+            # Skip user prompt + wrapped continuation lines
+            j = i + 1
+            while j < len(after_lines):
+                next_s = after_lines[j].strip()
+                if not next_s:
+                    j += 1
+                    continue
+                # Response starts with ● or ⎿ or non-indented content
+                if next_s.startswith(("●", "⎿")) or not after_lines[j].startswith(" "):
+                    break
+                j += 1
+            new_content = "\n".join(after_lines[j:])
             break
 
+    # Strategy 2: Anchor using lines BEFORE the ❯ prompt in `before`
     if not new_content:
-        anchor_size = min(5, len(before_lines))
-        anchor = "\n".join(before_lines[-anchor_size:])
-        after_text = "\n".join(after_lines)
-        idx = after_text.find(anchor)
-        if idx >= 0:
-            new_content = after_text[idx + len(anchor):]
+        # Find the last ❯ in before, use content above it as anchor
+        prompt_idx = -1
+        for i in range(len(before_lines) - 1, -1, -1):
+            if before_lines[i].strip().startswith("❯"):
+                prompt_idx = i
+                break
+        # Use 3 non-empty lines before the prompt
+        anchor_lines = []
+        if prompt_idx > 0:
+            for line in before_lines[max(0, prompt_idx - 5):prompt_idx]:
+                s = line.strip()
+                if s and not all(c in "─━═" for c in s):
+                    anchor_lines.append(line)
+        if anchor_lines:
+            anchor = "\n".join(anchor_lines[-3:])
+            after_text = "\n".join(after_lines)
+            idx = after_text.find(anchor)
+            if idx >= 0:
+                remaining = after_text[idx + len(anchor):]
+                # Skip to after the ❯ prompt line
+                rem_lines = remaining.split("\n")
+                start = 0
+                for k, line in enumerate(rem_lines):
+                    if line.strip().startswith("❯"):
+                        start = k + 1
+                        # Skip continuation/empty lines after prompt
+                        while start < len(rem_lines):
+                            ns = rem_lines[start].strip()
+                            if ns and ns.startswith(("●", "⎿")):
+                                break
+                            if ns and not rem_lines[start].startswith(" "):
+                                break
+                            start += 1
+                        break
+                new_content = "\n".join(rem_lines[start:])
 
+    # Strategy 3: Last resort — set difference
     if not new_content:
-        before_set = set(before_clean.split("\n"))
+        before_set = set(l for l in before_clean.split("\n") if l.strip())
         new_content = "\n".join(l for l in after_lines if l not in before_set)
 
+    # Clean noise lines
     cleaned_lines = []
     for line in new_content.split("\n"):
         stripped = line.strip()
@@ -157,9 +230,13 @@ def extract_response(before: str, after: str, user_msg: str) -> str:
             continue
         if "shift+tab" in stripped or "esc to interrupt" in stripped:
             continue
+        if "ctrl+o to expand" in stripped:
+            continue
+        if stripped.startswith("Tip:") or (stripped.startswith("⎿") and "Tip:" in stripped):
+            continue
         if stripped in ("❯", ">"):
             continue
-        if _is_processing_line(stripped):
+        if _is_spinner_line(stripped):
             continue
         cleaned_lines.append(line)
 
@@ -211,15 +288,12 @@ class TmuxSession:
                 elapsed += POLL_INTERVAL
 
                 current = capture_pane(pane_id)
-                # Stream incremental updates
+                # Stream full text each poll (not deltas — pane capture
+                # is unstable between polls due to ANSI/whitespace changes)
                 response_so_far = extract_response(before, current, prompt)
                 if response_so_far and response_so_far != last_streamed:
                     if stream_cb:
-                        delta = response_so_far
-                        if last_streamed and response_so_far.startswith(last_streamed):
-                            delta = response_so_far[len(last_streamed):]
-                        if delta.strip():
-                            await stream_cb(delta, False)
+                        await stream_cb(response_so_far, False)
                     last_streamed = response_so_far
 
                 if current != before and is_claude_idle(current):
@@ -527,7 +601,8 @@ class SDKSession:
                         if isinstance(block, TextBlock) and block.text:
                             text_parts.append(block.text)
                             if stream_cb:
-                                await stream_cb(block.text, False)
+                                # Send full accumulated text (consistent with tmux mode)
+                                await stream_cb("".join(text_parts), False)
 
                 elif isinstance(msg, ResultMessage):
                     if msg.session_id:
@@ -535,7 +610,7 @@ class SDKSession:
                     if not text_parts and msg.result:
                         text_parts.append(msg.result)
                         if stream_cb:
-                            await stream_cb(msg.result, False)
+                            await stream_cb("".join(text_parts), False)
 
             result.text = "".join(text_parts)
             if stream_cb:

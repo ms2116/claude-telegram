@@ -116,26 +116,22 @@ class Bot:
         await update.message.reply_text(  # type: ignore[union-attr]
             f"Claude Code Telegram Bot\n\n"
             f"Active: {current_name}\n"
-            f"Sessions: {session_list}\n\n"
-            f"/help — Commands\n"
-            f"/projects — Live tmux sessions\n"
-            f"/project <name> — Switch session\n"
-            f"/stop — Cancel (Ctrl+C)\n"
-            f"/new — New conversation\n"
-            f"/refresh — Reload sessions",
+            f"Tmux: {session_list}\n\n"
+            f"/help — Commands",
         )
 
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not self._is_allowed(update.effective_user.id):
             return
         await update.message.reply_text(  # type: ignore[union-attr]
-            "Messages → active tmux Claude session\n\n"
-            "/projects — Live tmux sessions\n"
-            "/project <name> — Switch session\n"
-            "/stop — Send Ctrl+C\n"
-            "/new — Send /new to Claude\n"
-            "/refresh — Reload tmux sessions\n"
-            "/status — Running tasks",
+            "Messages → active Claude session\n\n"
+            "/project <name> — Switch project\n"
+            "/projects — Show all projects\n"
+            "/session [n] — Pick session to resume\n"
+            "/new — New conversation\n"
+            "/stop — Cancel (Ctrl+C)\n"
+            "/status — Current project info\n"
+            "/refresh — Reload tmux sessions",
         )
 
     async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

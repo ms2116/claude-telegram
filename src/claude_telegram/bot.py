@@ -276,7 +276,13 @@ class Bot:
         return result
 
     def _switch_project(self, user_id: int, name: str, work_dir: str, is_tmux: bool) -> str:
-        """Switch user's active project. Returns HTML confirmation message."""
+        """Switch user's active project. Returns HTML message.
+
+        Blocks switching to inactive (no tmux session) projects.
+        """
+        if not is_tmux:
+            return (f"⚠️ <b>{_escape(name)}</b> — 비활성 세션\n\n"
+                    f"<i>tmux에서 Claude Code를 먼저 실행하세요</i>")
         self._user_projects[user_id] = work_dir or name
         return f"📂 <b>{_escape(name)}</b> 으로 전환"
 

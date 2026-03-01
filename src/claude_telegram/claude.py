@@ -29,6 +29,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from .config import Settings
+    from .pty_session import WindowsPtySession
 
 log = logging.getLogger(__name__)
 
@@ -340,7 +341,7 @@ class TmuxSession:
 class ClaudeManager:
     def __init__(self, settings: "Settings") -> None:
         self.settings = settings
-        self._sessions: dict[str, TmuxSession] = {}  # project_name -> TmuxSession
+        self._sessions: dict[str, TmuxSession | "WindowsPtySession"] = {}  # project -> session
 
     def load_sessions(self) -> None:
         """Load sessions from /tmp/claude_sessions/ registry."""
@@ -354,22 +355,43 @@ class ClaudeManager:
             try:
                 data = json.loads(f.read_text())
                 project = data["project"]
-                pane_id = data["pane_id"]
+                session_type = data.get("type", "tmux")
 
-                if not _is_pane_alive(pane_id):
-                    log.info("Session %s pane %s dead — skipping", project, pane_id)
-                    f.unlink(missing_ok=True)
-                    continue
-
-                info = SessionInfo(
-                    project=project,
-                    pane_id=pane_id,
-                    work_dir=data.get("work_dir", ""),
-                )
-                self._sessions[project] = TmuxSession(info)
-                log.info("Loaded session: %s (pane %s, dir %s)", project, pane_id, info.work_dir)
+                if session_type == "pty":
+                    self._load_pty_session(project, data)
+                else:
+                    self._load_tmux_session(project, data, f)
             except Exception as e:
                 log.warning("Failed to parse session file %s: %s", f, e)
+
+    def _load_tmux_session(self, project: str, data: dict, f: Path) -> None:
+        pane_id = data["pane_id"]
+        if not _is_pane_alive(pane_id):
+            log.info("Session %s pane %s dead — skipping", project, pane_id)
+            f.unlink(missing_ok=True)
+            return
+
+        info = SessionInfo(
+            project=project,
+            pane_id=pane_id,
+            work_dir=data.get("work_dir", ""),
+        )
+        self._sessions[project] = TmuxSession(info)
+        log.info("Loaded session: %s (pane %s, dir %s)", project, pane_id, info.work_dir)
+
+    def _load_pty_session(self, project: str, data: dict) -> None:
+        from .pty_session import WindowsPtySession
+
+        host = data.get("host", "127.0.0.1")
+        port = data.get("port", 50001)
+        info = SessionInfo(
+            project=project,
+            pane_id=f"pty:{host}:{port}",
+            work_dir=data.get("work_dir", ""),
+        )
+        session = WindowsPtySession(info, host, port)
+        self._sessions[project] = session
+        log.info("Loaded PTY session: %s (%s:%d, dir %s)", project, host, port, info.work_dir)
 
     def scan_tmux_panes(self) -> list[str]:
         """Scan all tmux panes for Claude Code sessions and auto-register.
@@ -457,37 +479,53 @@ class ClaudeManager:
             try:
                 data = json.loads(f.read_text())
                 project = data["project"]
+                session_type = data.get("type", "tmux")
                 disk_projects.add(project)
 
                 if project in known:
                     continue
 
-                pane_id = data.get("pane_id", "unknown")
+                if session_type == "pty":
+                    from .pty_session import WindowsPtySession
 
-                # Resolve "unknown" pane by scanning tmux
-                if pane_id == "unknown":
-                    pane_id = self._find_pane_for_dir(data.get("work_dir", ""))
-                    if pane_id:
-                        data["pane_id"] = pane_id
-                        f.write_text(json.dumps(data))
-                    else:
-                        log.debug("Session %s pane unknown and not found in tmux", project)
+                    host = data.get("host", "127.0.0.1")
+                    port = data.get("port", 50001)
+                    info = SessionInfo(
+                        project=project,
+                        pane_id=f"pty:{host}:{port}",
+                        work_dir=data.get("work_dir", ""),
+                    )
+                    session = WindowsPtySession(info, host, port)
+                    self._sessions[project] = session
+                    new_projects.append(project)
+                    log.info("New PTY session from hook: %s (%s:%d)", project, host, port)
+                else:
+                    pane_id = data.get("pane_id", "unknown")
+
+                    # Resolve "unknown" pane by scanning tmux
+                    if pane_id == "unknown":
+                        pane_id = self._find_pane_for_dir(data.get("work_dir", ""))
+                        if pane_id:
+                            data["pane_id"] = pane_id
+                            f.write_text(json.dumps(data))
+                        else:
+                            log.debug("Session %s pane unknown and not found in tmux", project)
+                            continue
+
+                    if not _is_pane_alive(pane_id):
+                        log.info("Session %s pane %s dead — removing", project, pane_id)
+                        f.unlink(missing_ok=True)
+                        disk_projects.discard(project)
                         continue
 
-                if not _is_pane_alive(pane_id):
-                    log.info("Session %s pane %s dead — removing", project, pane_id)
-                    f.unlink(missing_ok=True)
-                    disk_projects.discard(project)
-                    continue
-
-                info = SessionInfo(
-                    project=project,
-                    pane_id=pane_id,
-                    work_dir=data.get("work_dir", ""),
-                )
-                self._sessions[project] = TmuxSession(info)
-                new_projects.append(project)
-                log.info("New session from hook: %s (pane %s)", project, pane_id)
+                    info = SessionInfo(
+                        project=project,
+                        pane_id=pane_id,
+                        work_dir=data.get("work_dir", ""),
+                    )
+                    self._sessions[project] = TmuxSession(info)
+                    new_projects.append(project)
+                    log.info("New session from hook: %s (pane %s)", project, pane_id)
             except Exception as e:
                 log.warning("Failed to parse session file %s: %s", f, e)
 
@@ -526,10 +564,17 @@ class ClaudeManager:
         return None
 
     def _clean_dead_sessions(self) -> None:
-        """Remove sessions whose tmux pane is no longer alive."""
+        """Remove sessions whose tmux pane / PTY connection is no longer alive."""
+        from .pty_session import WindowsPtySession
+
         dead = []
         for name, s in self._sessions.items():
-            if not name.startswith("sdk:") and not _is_pane_alive(s.info.pane_id):
+            if name.startswith("sdk:"):
+                continue
+            if isinstance(s, WindowsPtySession):
+                if not s.is_alive:
+                    dead.append(name)
+            elif not _is_pane_alive(s.info.pane_id):
                 dead.append(name)
         for name in dead:
             del self._sessions[name]
@@ -537,11 +582,19 @@ class ClaudeManager:
             f.unlink(missing_ok=True)
             log.info("Removed dead session: %s", name)
 
+    async def connect_pty_sessions(self) -> None:
+        """Connect all loaded PTY sessions (call after load_sessions)."""
+        from .pty_session import WindowsPtySession
+
+        for s in self._sessions.values():
+            if isinstance(s, WindowsPtySession) and not s.is_alive:
+                await s.connect()
+
     def refresh(self) -> None:
         """Reload sessions from registry."""
         self.load_sessions()
 
-    def get_session(self, user_id: int, project_dir: str, **_: Any) -> TmuxSession | None:
+    def get_session(self, user_id: int, project_dir: str, **_: Any) -> "TmuxSession | WindowsPtySession | None":
         # Try exact project name match
         project_name = os.path.basename(project_dir.rstrip("/"))
         if project_name in self._sessions:
@@ -597,11 +650,22 @@ class ClaudeManager:
         system_prompt: str = "",
         max_retries: int = 2,
     ) -> SessionResult:
-        # Try tmux first
+        from .pty_session import WindowsPtySession
+
+        # Try tmux / PTY first
         session = self.get_session(user_id, project_dir)
         if not session:
             self.refresh()
+            await self.connect_pty_sessions()
             session = self.get_session(user_id, project_dir)
+
+        if session:
+            # Auto-connect PTY if needed
+            if isinstance(session, WindowsPtySession) and not session.is_alive:
+                await session.connect()
+                if not session.is_alive:
+                    log.warning("PTY session %s not reachable, falling back", session.info.project)
+                    session = None
 
         if session:
             return await session.execute(prompt, stream_cb)

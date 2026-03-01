@@ -136,7 +136,7 @@ class Bot:
         )
 
     async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Ctrl+C 전송 — tmux send-keys C-c."""
+        """Ctrl+C 전송."""
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
@@ -147,8 +147,12 @@ class Bot:
         session = self.claude.get_session(user.id, project)
         if session:
             try:
-                import subprocess
-                subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "C-c"], timeout=5)
+                from .pty_session import WindowsPtySession
+                if isinstance(session, WindowsPtySession):
+                    await session.send_key("\x03")
+                else:
+                    import subprocess
+                    subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "C-c"], timeout=5)
                 await self._reply_html(update, "⏹ <b>작업 중단</b>")
                 return
             except Exception:
@@ -160,7 +164,7 @@ class Bot:
             await self._reply_html(update, "⚠️ 실행 중인 작업이 없습니다")
 
     async def cmd_esc(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Escape 키 전송 (tmux 전용)."""
+        """Escape 키 전송."""
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
@@ -170,14 +174,18 @@ class Bot:
             return
         session = self.claude.get_session(user.id, project)
         if session:
-            import subprocess
-            subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "Escape"], timeout=5)
+            from .pty_session import WindowsPtySession
+            if isinstance(session, WindowsPtySession):
+                await session.send_key("\x1b")
+            else:
+                import subprocess
+                subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "Escape"], timeout=5)
             await self._reply_html(update, "⎋ <b>Escape 전송</b>")
         else:
-            await self._reply_html(update, "⚠️ tmux 세션이 없습니다")
+            await self._reply_html(update, "⚠️ 세션이 없습니다")
 
     async def cmd_yes(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """권한 승인 — y + Enter 전송 (tmux 전용)."""
+        """권한 승인 — y + Enter 전송."""
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
@@ -187,13 +195,17 @@ class Bot:
             return
         session = self.claude.get_session(user.id, project)
         if session:
-            import subprocess
-            subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "y"], timeout=5)
-            await asyncio.sleep(0.1)
-            subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "Enter"], timeout=5)
+            from .pty_session import WindowsPtySession
+            if isinstance(session, WindowsPtySession):
+                await session.send_key("y\n")
+            else:
+                import subprocess
+                subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "y"], timeout=5)
+                await asyncio.sleep(0.1)
+                subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "Enter"], timeout=5)
             await self._reply_html(update, "✅ <b>승인 전송</b>")
         else:
-            await self._reply_html(update, "⚠️ tmux 세션이 없습니다")
+            await self._reply_html(update, "⚠️ 세션이 없습니다")
 
     async def cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -207,14 +219,18 @@ class Bot:
         session = self.claude.get_session(user.id, project)
         if session:
             try:
-                from .claude import send_to_tmux
-                await send_to_tmux(session.info.pane_id, "/new")
+                from .pty_session import WindowsPtySession
+                if isinstance(session, WindowsPtySession):
+                    await session.send_key("/new\n")
+                else:
+                    from .claude import send_to_tmux
+                    await send_to_tmux(session.info.pane_id, "/new")
                 await self._reply_html(update, "🔄 <b>새 대화 시작</b>")
             except Exception:
                 log.warning("Failed to send /new", exc_info=True)
                 await self._reply_html(update, "❌ /new 전송 실패")
         else:
-            await self._reply_html(update, "⚠️ tmux 세션이 없습니다")
+            await self._reply_html(update, "⚠️ 세션이 없습니다")
 
     async def cmd_project(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user

@@ -77,6 +77,9 @@ def main() -> None:
     )
 
     async def post_init(application) -> None:
+        # Connect PTY sessions (needs event loop)
+        await claude.connect_pty_sessions()
+
         from telegram import BotCommand
         await application.bot.set_my_commands([
             BotCommand("project", "프로젝트 전환"),
@@ -101,6 +104,8 @@ def main() -> None:
                 await asyncio.sleep(SESSION_CHECK_INTERVAL)
                 try:
                     new_projects, removed_projects = claude.check_new_sessions()
+                    if new_projects:
+                        await claude.connect_pty_sessions()
                     all_sessions = claude.get_all_sessions()
                     total = len(all_sessions)
 

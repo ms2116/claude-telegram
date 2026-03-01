@@ -200,7 +200,7 @@ class PtyWrapper:
         """Get the Windows host IP as seen from WSL (for WSL2 networking)."""
         try:
             r = self._wsl_bash(
-                "ip route show default | awk '{print $3}'",
+                "ip route show default | head -1 | cut -d' ' -f3",
                 capture_output=True, timeout=5,
             )
             if r.returncode == 0:

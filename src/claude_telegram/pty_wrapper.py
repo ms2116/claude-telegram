@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import msvcrt
 import os
 import re
 import socket
@@ -285,17 +286,38 @@ class PtyWrapper:
     # ── stdin → PTY ──
 
     def _stdin_thread(self):
-        """Forward local stdin to the PTY."""
+        """Forward local stdin to the PTY using raw key input (msvcrt)."""
         try:
-            stdin: BinaryIO = sys.stdin.buffer
             while self._running:
-                data = stdin.read(1)
-                if not data:
-                    break
-                if self._pty and self._pty.isalive():
-                    # pywinpty 3.x: write() accepts str
-                    text = data.decode("utf-8", errors="replace")
-                    self._pty.write(text)
+                if not msvcrt.kbhit():
+                    time.sleep(0.01)
+                    continue
+                # msvcrt.getwch() returns one char without echo, raw mode
+                ch = msvcrt.getwch()
+                if not ch:
+                    continue
+                # Special keys: getwch returns '\x00' or '\xe0' prefix
+                if ch in ("\x00", "\xe0"):
+                    ch2 = msvcrt.getwch()
+                    # Map common special keys to ANSI sequences
+                    key_map = {
+                        "H": "\x1b[A",  # Up
+                        "P": "\x1b[B",  # Down
+                        "M": "\x1b[C",  # Right
+                        "K": "\x1b[D",  # Left
+                        "G": "\x1b[H",  # Home
+                        "O": "\x1b[F",  # End
+                        "R": "\x1b[2~", # Insert
+                        "S": "\x1b[3~", # Delete
+                        "I": "\x1b[5~", # PageUp
+                        "Q": "\x1b[6~", # PageDown
+                    }
+                    seq = key_map.get(ch2, "")
+                    if seq and self._pty and self._pty.isalive():
+                        self._pty.write(seq)
+                else:
+                    if self._pty and self._pty.isalive():
+                        self._pty.write(ch)
         except (OSError, EOFError):
             pass
 

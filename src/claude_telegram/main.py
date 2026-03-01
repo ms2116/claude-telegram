@@ -69,6 +69,18 @@ def main() -> None:
     startup_msg = f"봇 기동됨 ({session_count}개 세션)\n활성: {', '.join(session_names) or '없음'}"
 
     async def post_init(application) -> None:
+        from telegram import BotCommand
+        await application.bot.set_my_commands([
+            BotCommand("project", "프로젝트 전환"),
+            BotCommand("projects", "전체 프로젝트 목록"),
+            BotCommand("session", "이전 세션 선택"),
+            BotCommand("new", "새 대화 시작"),
+            BotCommand("stop", "Ctrl+C — 작업 중단"),
+            BotCommand("esc", "Escape 전송"),
+            BotCommand("yes", "권한 승인 (y + Enter)"),
+            BotCommand("status", "현재 상태 확인"),
+            BotCommand("help", "명령어 도움말"),
+        ])
         for uid in settings.get_allowed_users():
             try:
                 await application.bot.send_message(chat_id=uid, text=startup_msg)

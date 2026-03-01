@@ -129,12 +129,15 @@ class Bot:
             "/projects — 전체 프로젝트 목록\n"
             "/session [번호] — 이전 세션 선택\n"
             "/new — 새 대화 시작\n"
-            "/stop — 작업 중단 (Ctrl+C)\n"
+            "/stop — Ctrl+C (작업 중단)\n"
+            "/esc — Escape 전송\n"
+            "/yes — 권한 승인 (y + Enter)\n"
             "/status — 현재 상태 확인\n"
             "/refresh — tmux 세션 새로고침",
         )
 
     async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Ctrl+C 전송 — tmux: send-keys C-c, SDK: interrupt."""
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
@@ -142,11 +145,58 @@ class Bot:
         if not project:
             await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
             return
+        # tmux: Ctrl+C 직접 전송
+        session = self.claude.get_session(user.id, project)
+        if session:
+            try:
+                import subprocess
+                subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "C-c"], timeout=5)
+                await update.message.reply_text("Ctrl+C 전송됨 (작업 중단)")  # type: ignore[union-attr]
+                return
+            except Exception:
+                pass
+        # SDK: interrupt
         interrupted = await self.claude.interrupt_session(user.id, project)
         if interrupted:
             await update.message.reply_text("작업을 중단했습니다.")  # type: ignore[union-attr]
         else:
             await update.message.reply_text("실행 중인 작업이 없습니다.")  # type: ignore[union-attr]
+
+    async def cmd_esc(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Escape 키 전송 (tmux 전용)."""
+        user = update.effective_user
+        if not user or not self._is_allowed(user.id):
+            return
+        project = self._get_project(user.id)
+        if not project:
+            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
+            return
+        session = self.claude.get_session(user.id, project)
+        if session:
+            import subprocess
+            subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "Escape"], timeout=5)
+            await update.message.reply_text("Escape 전송됨")  # type: ignore[union-attr]
+        else:
+            await update.message.reply_text("tmux 세션이 아닙니다.")  # type: ignore[union-attr]
+
+    async def cmd_yes(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """권한 승인 — y + Enter 전송 (tmux 전용)."""
+        user = update.effective_user
+        if not user or not self._is_allowed(user.id):
+            return
+        project = self._get_project(user.id)
+        if not project:
+            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
+            return
+        session = self.claude.get_session(user.id, project)
+        if session:
+            import subprocess
+            subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "y"], timeout=5)
+            await asyncio.sleep(0.1)
+            subprocess.run(["tmux", "send-keys", "-t", session.info.pane_id, "Enter"], timeout=5)
+            await update.message.reply_text("승인(y) 전송됨")  # type: ignore[union-attr]
+        else:
+            await update.message.reply_text("tmux 세션이 아닙니다.")  # type: ignore[union-attr]
 
     async def cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -486,6 +536,8 @@ class Bot:
         app.add_handler(CommandHandler("start", self.cmd_start))
         app.add_handler(CommandHandler("help", self.cmd_help))
         app.add_handler(CommandHandler("stop", self.cmd_stop))
+        app.add_handler(CommandHandler("esc", self.cmd_esc))
+        app.add_handler(CommandHandler("yes", self.cmd_yes))
         app.add_handler(CommandHandler("new", self.cmd_new))
         app.add_handler(CommandHandler("project", self.cmd_project))
         app.add_handler(CommandHandler("projects", self.cmd_projects))

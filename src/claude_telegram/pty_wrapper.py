@@ -537,7 +537,13 @@ def main():
         "--wsl-distro", default=None,
         help="WSL distro name for session registration (auto-detected if omitted)",
     )
-    args = parser.parse_args()
+    # Capture remaining args to pass to claude
+    args, claude_args = parser.parse_known_args()
+
+    # Build full command: claude.exe + extra args
+    cmd = args.cmd
+    if claude_args:
+        cmd = cmd + " " + " ".join(claude_args)
 
     # Auto-detect WSL distro: find one running claude-telegram
     wsl_distro = args.wsl_distro
@@ -546,7 +552,7 @@ def main():
 
     wrapper = PtyWrapper(
         port=args.port,
-        cmd=args.cmd,
+        cmd=cmd,
         project=args.project,
         no_register=args.no_register,
         wsl_distro=wsl_distro,

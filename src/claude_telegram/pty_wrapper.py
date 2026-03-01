@@ -345,7 +345,11 @@ class PtyWrapper:
     # ── PTY → stdout + pyte screen ──
 
     def _pty_read_thread(self):
-        """Poll PTY output, write to stdout and feed into pyte virtual terminal."""
+        """Poll PTY output, batch writes to reduce TUI flicker."""
+        buf = ""
+        last_write = time.monotonic()
+        FLUSH_DELAY = 0.03  # 30ms batch window
+
         while self._running:
             if not self._pty or not self._pty.isalive():
                 break
@@ -353,24 +357,28 @@ class PtyWrapper:
                 text: str = self._pty.read()
             except (OSError, EOFError):
                 break
+
+            if text:
+                buf += text
+                # Feed into pyte immediately (it handles ANSI correctly)
+                with self._screen_lock:
+                    self._stream.feed(text)
+
+            now = time.monotonic()
+            # Flush to stdout after batch window or when idle
+            if buf and (now - last_write >= FLUSH_DELAY or not text):
+                try:
+                    display = DA_RE.sub("", buf)
+                    if display:
+                        sys.stdout.write(display)
+                        sys.stdout.flush()
+                except OSError:
+                    pass
+                buf = ""
+                last_write = now
+
             if not text:
                 time.sleep(PTY_READ_INTERVAL)
-                continue
-
-            # Raw output to local terminal (filter DA response, preserve other ANSI)
-            try:
-                display = DA_RE.sub("", text)
-                if display:
-                    sys.stdout.write(display)
-                    sys.stdout.flush()
-            except OSError:
-                pass
-
-            # Feed into pyte virtual terminal
-            with self._screen_lock:
-                self._stream.feed(text)
-
-            time.sleep(PTY_READ_INTERVAL)
 
     # ── Screen snapshot → TCP broadcast ──
 

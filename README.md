@@ -18,11 +18,19 @@
 
 ## 작동 방식
 
-```
-텔레그램 ──메시지──> 봇 ──send-keys──> tmux (Claude Code)
-                     │                       │
-                   edit  <──capture-pane─────┘
-                (2초 쓰로틀, 전체 텍스트 교체)
+```mermaid
+sequenceDiagram
+    participant T as 📱 Telegram
+    participant B as 🤖 Bot
+    participant X as 🖥️ tmux (Claude Code)
+
+    T->>B: 메시지 전송
+    B->>X: send-keys (입력 전달)
+    loop 매 1초 폴링
+        X-->>B: capture-pane (출력 캡처)
+        B-->>T: edit_message (2초 쓰로틀)
+    end
+    B->>T: ✅ 완료 알림
 ```
 
 tmux 위에서 돌아가는 Claude Code 세션에 직접 연결합니다. SDK나 API 래퍼 없이, `send-keys`로 입력하고 `capture-pane`으로 출력을 읽어오는 단순한 구조입니다.

@@ -29,8 +29,8 @@ import re
 
 import pyte
 
-# DA (Device Attributes) response: ESC[?...c — filter from PTY output before display
-DA_RE = re.compile(r"\x1b\[\?[0-9;]*c")
+# DA (Device Attributes) response filter — both ANSI and plain text forms
+DA_RE = re.compile(r"\x1b\[\?[0-9;]*c|\?[0-9;]{10,}c")
 DEFAULT_PORT = 50001
 WSL_SESSION_DIR = "/tmp/claude_sessions"
 # Repo root: pty_wrapper.py → src/claude_telegram/ → src/ → repo

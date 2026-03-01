@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from telegram import LinkPreviewOptions, Update
-from telegram.constants import ChatAction, ParseMode
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -76,8 +76,6 @@ class Bot:
         self.store = store
         # user_id -> active project_dir
         self._user_projects: dict[int, str] = {}
-        # user_id -> active store session id
-        self._user_store_sessions: dict[int, int] = {}
 
     def _is_allowed(self, user_id: int) -> bool:
         allowed = self.settings.get_allowed_users()
@@ -93,17 +91,6 @@ class Bot:
             self._user_projects[user_id] = first.work_dir or first.project
             return self._user_projects[user_id]
         return None
-
-    async def _ensure_store_session(self, user_id: int, project_dir: str) -> int:
-        if user_id in self._user_store_sessions:
-            return self._user_store_sessions[user_id]
-        existing = await self.store.get_active_session(user_id, project_dir)
-        if existing:
-            self._user_store_sessions[user_id] = existing["id"]
-            return existing["id"]
-        sid = await self.store.create_session(user_id, project_dir)
-        self._user_store_sessions[user_id] = sid
-        return sid
 
     # --- Command Handlers ---
 
@@ -129,17 +116,16 @@ class Bot:
             "메시지를 보내면 현재 프로젝트의 Claude에 전달됩니다\n\n"
             "/project <이름> — 프로젝트 전환\n"
             "/projects — 전체 프로젝트 목록\n"
-            "/session [번호] — 이전 세션 선택\n"
+            "/1, /2, ... — 번호로 프로젝트 전환\n"
             "/new — 새 대화 시작\n"
             "/stop — Ctrl+C (작업 중단)\n"
             "/esc — Escape 전송\n"
             "/yes — 권한 승인 (y + Enter)\n"
-            "/status — 현재 상태 확인\n"
-            "/refresh — tmux 세션 새로고침",
+            "/status — 현재 상태 확인",
         )
 
     async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Ctrl+C 전송 — tmux: send-keys C-c, SDK: interrupt."""
+        """Ctrl+C 전송 — tmux send-keys C-c."""
         user = update.effective_user
         if not user or not self._is_allowed(user.id):
             return
@@ -209,12 +195,6 @@ class Bot:
             await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
             return
 
-        # End current store session
-        if user.id in self._user_store_sessions:
-            await self.store.end_session(self._user_store_sessions[user.id])
-            del self._user_store_sessions[user.id]
-
-        # Tmux mode: send /new to Claude Code directly
         session = self.claude.get_session(user.id, project)
         if session:
             try:
@@ -225,9 +205,7 @@ class Bot:
                 log.warning("Failed to send /new", exc_info=True)
                 await update.message.reply_text("/new 전송 실패.")  # type: ignore[union-attr]
         else:
-            # SDK mode: clear the SDK session so next message starts fresh
-            self.claude.clear_sdk_session(project)
-            await update.message.reply_text("세션 초기화 완료. 다음 메시지부터 새 대화입니다.")  # type: ignore[union-attr]
+            await update.message.reply_text("tmux 세션이 없습니다.")  # type: ignore[union-attr]
 
     async def cmd_project(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -262,34 +240,13 @@ class Bot:
                 self._user_projects[user.id] = info.work_dir or name
                 await update.message.reply_text(f"{name} (tmux)로 전환했습니다")  # type: ignore[union-attr]
                 return
-        # Fallback: match CT_PROJECT_DIRS (SDK mode)
-        for d in self.settings.get_project_dirs():
-            if target.lower() in (d.lower(), os.path.basename(d).lower()):
-                self._user_projects[user.id] = d
-                # Show available sessions for selection
-                from .claude import SDKSession
-                found = SDKSession.find_sessions(d, limit=5)
-                lines = [f"{os.path.basename(d)} (SDK)로 전환했습니다"]
-                if found:
-                    lines.append("\n최근 세션:")
-                    for i, s in enumerate(found):
-                        import time as _time
-                        ts = _time.strftime("%m/%d %H:%M", _time.localtime(s["mtime"]))
-                        marker = " *" if i == 0 else ""
-                        lines.append(f"  {i+1}. {s['id'][:8]}... ({ts}, {s['source']}){marker}")
-                    lines.append(f"\n1번 세션으로 자동 연결. /session <번호>로 변경 가능")
-                else:
-                    lines.append("이전 세션 없음. 새 세션으로 시작합니다.")
-                await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
-                return
-        available = list(sessions.keys()) + [os.path.basename(d) for d in self.settings.get_project_dirs()]
-        await update.message.reply_text(f"'{target}' 을(를) 찾을 수 없습니다\n목록: {available}")  # type: ignore[union-attr]
+        available = list(sessions.keys())
+        await update.message.reply_text(f"'{target}' 을(를) 찾을 수 없습니다\n활성 세션: {available or '없음'}")  # type: ignore[union-attr]
 
     def _build_project_list(self) -> list[tuple[int, str, str, bool]]:
-        """Build numbered project list: (num, name, source, is_tmux).
+        """Build numbered project list: (num, name, work_dir, is_tmux).
 
-        Active tmux sessions first, then SDK-only projects.
-        Numbers are stable per session (rebuilt on each call).
+        Active tmux sessions first, then inactive env projects.
         """
         result: list[tuple[int, str, str, bool]] = []
         tmux_sessions = self.claude.get_all_sessions()
@@ -301,7 +258,7 @@ class Bot:
             result.append((num, name, info.work_dir, True))
             tmux_dirs.add(info.work_dir)
             num += 1
-        # SDK-only projects from env
+        # Inactive projects from env (no tmux session)
         for d in self.settings.get_project_dirs():
             if d not in tmux_dirs:
                 result.append((num, os.path.basename(d), d, False))
@@ -372,59 +329,6 @@ class Bot:
             lines.append("  tmux 세션 없음")
         await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
 
-    async def cmd_session(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Select a specific session for the current SDK project."""
-        user = update.effective_user
-        if not user or not self._is_allowed(user.id):
-            return
-        project = self._get_project(user.id)
-        if not project:
-            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
-            return
-
-        from .claude import SDKSession
-        found = SDKSession.find_sessions(project, limit=5)
-        if not found:
-            await update.message.reply_text("이 프로젝트의 세션이 없습니다.")  # type: ignore[union-attr]
-            return
-
-        args = (update.message.text or "").split(maxsplit=1)  # type: ignore[union-attr]
-        if len(args) < 2:
-            # Show session list
-            import time as _time
-            lines = [f"{os.path.basename(project)} 세션 목록:"]
-            for i, s in enumerate(found):
-                ts = _time.strftime("%m/%d %H:%M", _time.localtime(s["mtime"]))
-                lines.append(f"  {i+1}. {s['id'][:8]}... ({ts}, {s['source']})")
-            lines.append(f"\n사용법: /session <번호>")
-            await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
-            return
-
-        try:
-            idx = int(args[1].strip()) - 1
-            if 0 <= idx < len(found):
-                chosen = found[idx]
-                # Clear existing SDK session and set the chosen one
-                self.claude.clear_sdk_session(project)
-                sdk = self.claude.get_or_create_sdk_session(project)
-                sdk._sdk_session_id = chosen["id"]
-                await update.message.reply_text(  # type: ignore[union-attr]
-                    f"세션 설정: {chosen['id'][:8]}... ({chosen['source']})"
-                )
-            else:
-                await update.message.reply_text(f"1~{len(found)} 사이 번호를 입력하세요")  # type: ignore[union-attr]
-        except ValueError:
-            await update.message.reply_text("사용법: /session <번호>")  # type: ignore[union-attr]
-
-    async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        user = update.effective_user
-        if not user or not self._is_allowed(user.id):
-            return
-        self.claude.refresh()
-        sessions = self.claude.get_all_sessions()
-        names = list(sessions.keys())
-        await update.message.reply_text(f"새로고침 완료: {names or '세션 없음'}")  # type: ignore[union-attr]
-
     # --- Message Handler ---
 
     async def handle_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -444,16 +348,6 @@ class Bot:
         prompt = await self._build_prompt(msg, ctx)
         if not prompt:
             return
-
-        # Get memories for system prompt
-        memories = await self.store.get_memories(user.id, project)
-        system_prompt = ""
-        if memories:
-            mem_text = "\n".join(f"- {m}" for m in memories)
-            system_prompt = f"Previous session context:\n{mem_text}"
-
-        # Ensure store session
-        store_sid = await self._ensure_store_session(user.id, project)
 
         # Send typing indicator and placeholder message
         await ctx.bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
@@ -491,7 +385,6 @@ class Bot:
                 project_dir=project,
                 prompt=prompt,
                 stream_cb=stream_cb,
-                system_prompt=system_prompt,
             )
 
             # Build final display text
@@ -522,12 +415,6 @@ class Bot:
 
             # Completion notification (new message = triggers sound)
             await msg.reply_text("완료")
-
-            # Log usage
-            await self.store.update_session(
-                store_sid,
-                increment_messages=True,
-            )
 
         except Exception as e:
             log.exception("Error processing message")
@@ -591,8 +478,6 @@ class Bot:
         app.add_handler(CommandHandler("project", self.cmd_project))
         app.add_handler(CommandHandler("projects", self.cmd_projects))
         app.add_handler(CommandHandler("status", self.cmd_status))
-        app.add_handler(CommandHandler("session", self.cmd_session))
-        app.add_handler(CommandHandler("refresh", self.cmd_refresh))
         # Number shortcuts: /1, /2, ... /20 for quick project switch
         for n in range(1, 21):
             app.add_handler(CommandHandler(str(n), self.cmd_switch_by_number))

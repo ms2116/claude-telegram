@@ -75,7 +75,6 @@ def main() -> None:
         await application.bot.set_my_commands([
             BotCommand("project", "프로젝트 전환"),
             BotCommand("projects", "전체 프로젝트 목록"),
-            BotCommand("session", "이전 세션 선택"),
             BotCommand("new", "새 대화 시작"),
             BotCommand("stop", "Ctrl+C — 작업 중단"),
             BotCommand("esc", "Escape 전송"),

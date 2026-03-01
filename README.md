@@ -1,101 +1,106 @@
 # claude-telegram
 
-Claude Code 세션을 텔레그램으로 제어하는 봇.
+> Control Claude Code sessions from Telegram via tmux.
 
-tmux 세션에 직접 연결하여 중간 도구 실행 과정까지 실시간으로 확인 가능. SDK 폴백으로 tmux 없는 프로젝트도 지원.
+Send a message on Telegram, watch Claude think and execute tools in real-time, get notified when it's done. All without leaving your phone.
 
-## 주요 기능
+## How it works
 
-- **실시간 스트리밍** — Claude의 도구 실행 과정(`● Bash(...)`, `⎿ 결과`)을 텔레그램에서 실시간 확인
-- **하이브리드 연결** — tmux `capture-pane` 우선, SDK `resume` 폴백
-- **자동 세션 감지** — SessionStart/End hook으로 세션 자동 등록/해제 + 텔레그램 알림
-- **다중 프로젝트** — `/projects`로 번호 목록 확인, `/1` `/2`로 빠른 전환, 활성(●)/비활성(○) 표시
-- **세션 이어하기** — `/session`으로 이전 세션 선택 및 resume
-- **완료 알림** — 작업 완료 시 별도 알림 메시지 (소리)
-- **링크 프리뷰 비활성화** — URL 포함 응답에서 프리뷰 노이즈 제거
-- **자동 재시작** — `run.sh` circuit breaker (5회 크래시/60초 감지, 자동 복구)
+```
+Telegram  ──msg──>  Bot  ──send-keys──>  tmux pane (Claude Code)
+                     |                         |
+                    edit  <──capture-pane──────┘
+                   (2s throttle, full text replace)
+```
 
-## 명령어
+The bot attaches to tmux panes running Claude Code, pipes your messages in via `send-keys`, and streams back the output by polling `capture-pane` every second. No SDK, no API wrapper — just tmux.
 
-| 명령어 | 설명 |
-|--------|------|
-| `/project <이름>` | 프로젝트 전환 |
-| `/projects` | 번호 목록 (● 활성 ○ 비활성) |
-| `/1`, `/2`, ... | 번호로 프로젝트 전환 |
-| `/session [번호]` | 이전 세션 선택 |
-| `/new` | 새 대화 시작 |
-| `/stop` | Ctrl+C — 작업 중단 |
-| `/esc` | Escape 전송 |
-| `/yes` | 권한 승인 (y + Enter) |
-| `/status` | 현재 상태 확인 |
-| `/refresh` | tmux 세션 새로고침 |
+## Features
 
-## 설치
+- **Real-time streaming** — see tool calls (`Bash(...)`, `Read(...)`) and results as they happen
+- **Auto session detection** — Claude Code hooks register/unregister sessions automatically
+- **Multi-project** — `/projects` shows numbered list, `/1` `/2` to switch instantly
+- **Completion alerts** — silent edits during work, sound notification on finish
+- **Circuit breaker** — `run.sh` watchdog with crash detection (5 crashes / 60s)
+
+## Commands
+
+| Command | Action |
+|---------|--------|
+| `/projects` | List all projects (● active, ○ inactive) |
+| `/1`, `/2`, ... | Switch project by number |
+| `/project <name>` | Switch by name |
+| `/new` | Start fresh conversation |
+| `/stop` | Send Ctrl+C |
+| `/esc` | Send Escape |
+| `/yes` | Approve permission (y + Enter) |
+| `/status` | Show sessions and state |
+
+## Quick start
 
 ```bash
 git clone https://github.com/ms2116/claude-telegram.git
 cd claude-telegram
 uv sync
-cp .env.example .env  # 토큰, 유저ID, 프로젝트 경로 설정
-```
-
-## 설정 (.env)
-
-| 변수 | 필수 | 설명 |
-|------|------|------|
-| `CT_TELEGRAM_BOT_TOKEN` | O | @BotFather에서 발급받은 토큰 |
-| `CT_ALLOWED_USERS` | - | 허용할 텔레그램 유저 ID (쉼표 구분) |
-| `CT_PROJECT_DIRS` | O | 프로젝트 디렉토리 목록 (쉼표 구분) |
-| `CT_PERMISSION_MODE` | - | `acceptEdits` (기본), `default`, `bypassPermissions` |
-| `CT_MODEL` | - | Claude 모델 지정 |
-| `CT_MAX_TURNS` | - | 쿼리당 최대 턴 (0 = 무제한) |
-
-## 실행
-
-```bash
-# 직접 실행
+cp .env.example .env   # edit: token, user ID, project dirs
 uv run claude-telegram
-
-# 자동 재시작 (프로덕션)
-bash run.sh
 ```
 
-## 자동 기동 (SessionStart hook)
+## Configuration
 
-`~/.claude/settings.json`에 hook 등록하면 Claude Code 세션 시작/종료 시 봇 자동 관리:
+Set in `.env` (prefix `CT_`):
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CT_TELEGRAM_BOT_TOKEN` | Yes | Token from @BotFather |
+| `CT_ALLOWED_USERS` | | Telegram user IDs, comma-separated |
+| `CT_PROJECT_DIRS` | Yes | Project directories, comma-separated |
+| `CT_PERMISSION_MODE` | | `acceptEdits` (default) / `default` / `bypassPermissions` |
+| `CT_MODEL` | | Claude model override |
+| `CT_MAX_TURNS` | | Max turns per query (0 = unlimited) |
+
+## Auto-start with hooks
+
+Register in `~/.claude/settings.json` to auto-manage sessions:
 
 ```json
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [{"type": "command", "command": "bash /path/to/register-session.sh"}]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [{"type": "command", "command": "bash /path/to/unregister-session.sh"}]
-      }
-    ]
+    "SessionStart": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "bash /path/to/register-session.sh"}]
+    }],
+    "SessionEnd": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "bash /path/to/unregister-session.sh"}]
+    }]
   }
 }
 ```
 
-> **주의**: `settings.local.json`이 아닌 `settings.json`에 등록해야 함. `"matcher": ""`와 `bash` 명시 필수.
+When a Claude Code session starts, the hook writes a session file to `/tmp/claude_sessions/`. The bot's background watcher (30s interval) picks it up and sends a Telegram notification. On session end, same flow in reverse.
 
-## 구조
+> **Note**: Must be `settings.json`, not `settings.local.json`. Both `"matcher": ""` and `bash` prefix are required.
+
+## Production
+
+```bash
+bash run.sh   # PID lock + circuit breaker + auto-restart
+```
+
+## Architecture
 
 ```
 src/claude_telegram/
-├── config.py    # 환경변수 설정 (CT_ prefix)
-├── claude.py    # TmuxSession + SDKSession + ClaudeManager
-├── bot.py       # 텔레그램 핸들러, 스트리밍
-├── store.py     # SQLite: 세션, 메모리
-└── main.py      # 엔트리포인트
+├── config.py    # pydantic-settings, CT_ env vars
+├── claude.py    # TmuxSession + ClaudeManager
+├── bot.py       # Telegram handlers, streaming
+├── store.py     # SQLite session logging
+└── main.py      # Entrypoint, startup notification
 ```
 
-## 라이선스
+5 files, ~800 lines. No over-engineering.
+
+## License
 
 MIT

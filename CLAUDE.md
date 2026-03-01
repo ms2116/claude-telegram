@@ -1,13 +1,13 @@
 # claude-telegram
 
-Claude Code 세션을 텔레그램으로 제어하는 봇. tmux 우선, SDK 폴백.
+Claude Code 세션을 텔레그램으로 제어하는 봇. tmux 기반.
 
 ## 구조
 
 `src/claude_telegram/` 5개 파일:
 - `config.py` — pydantic-settings, `CT_` prefix 환경변수
-- `claude.py` — `TmuxSession` (capture-pane 기반), `SDKSession` (resume 지원), `ClaudeManager`
-- `store.py` — aiosqlite: 세션, 메모리
+- `claude.py` — `TmuxSession` (capture-pane 기반), `ClaudeManager`
+- `store.py` — aiosqlite: 세션 로깅
 - `bot.py` — 텔레그램 핸들러, 스트리밍 (2초 throttle edit, 완료 시 별도 알림)
 - `main.py` — 엔트리포인트, `post_init`에서 기동 알림 + 명령어 등록
 
@@ -18,7 +18,7 @@ Claude Code 세션을 텔레그램으로 제어하는 봇. tmux 우선, SDK 폴�
 
 ## 핵심 설계
 
-- **하이브리드**: tmux `send-keys`/`capture-pane` 우선 → SDK `resume` 폴백
+- **tmux 기반**: tmux `send-keys`/`capture-pane`으로 Claude Code 직접 제어
 - **스트리밍**: 매 1초 `capture_pane` → `extract_response`로 응답 추출 → 전체 텍스트 교체 방식 (delta 아님)
 - **`extract_response`**: `user_msg[:15]`로 짧게 검색 (한글 tmux 줄바꿈 대응), 앵커 폴백
 - **`_is_spinner_line`**: `(` 위치로 tool call(`● Bash(cmd…)`) vs thinking(`✽ Thinking… (53s)`) 구분
@@ -44,4 +44,5 @@ bash run.sh
 3. `/esc` → Escape 전송
 4. `/yes` → y + Enter 전송
 5. `/project <name>` → 프로젝트 전환
-6. `/session` → 이전 세션 목록 및 선택
+6. `/projects` → 번호 목록 (● 활성 ○ 비활성)
+7. `/1` `/2` → 번호로 프로젝트 전환

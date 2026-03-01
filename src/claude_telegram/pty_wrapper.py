@@ -196,12 +196,30 @@ class PtyWrapper:
         cmd += ["--", "bash", "-c", script]
         return subprocess.run(cmd, **kwargs)
 
+    def _get_wsl_host_ip(self) -> str:
+        """Get the Windows host IP as seen from WSL (for WSL2 networking)."""
+        try:
+            r = self._wsl_bash(
+                "ip route show default | awk '{print $3}'",
+                capture_output=True, timeout=5,
+            )
+            if r.returncode == 0:
+                ip = r.stdout.decode().strip()
+                if ip:
+                    sys.stderr.write(f"[bridge-claude] WSL host IP: {ip}\n")
+                    sys.stderr.flush()
+                    return ip
+        except Exception:
+            pass
+        return "127.0.0.1"
+
     def _register_session(self) -> None:
         """Write session JSON to WSL /tmp/claude_sessions/ via wsl command."""
+        host_ip = self._get_wsl_host_ip()
         data = json.dumps({
             "project": self.project,
             "type": "pty",
-            "host": "127.0.0.1",
+            "host": host_ip,
             "port": self.port,
             "work_dir": os.getcwd(),
             "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -326,11 +344,11 @@ class PtyWrapper:
     def _tcp_server_thread(self):
         self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_sock.bind(("127.0.0.1", self.port))
+        self._server_sock.bind(("0.0.0.0", self.port))
         self._server_sock.listen(4)
         self._server_sock.settimeout(1.0)
 
-        sys.stderr.write(f"[bridge-claude] TCP listening on 127.0.0.1:{self.port}\n")
+        sys.stderr.write(f"[bridge-claude] TCP listening on 0.0.0.0:{self.port}\n")
         sys.stderr.flush()
 
         while self._running:

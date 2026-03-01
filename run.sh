@@ -11,6 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_FILE="${CT_BOT_LOG:-/tmp/claude-telegram.log}"
 LOCK_FILE="/tmp/claude_telegram_bot.pid"
+SESSION_DIR="/tmp/claude_sessions"
 
 # circuit breaker 설정
 CB_WINDOW=60
@@ -82,11 +83,19 @@ count_recent_crashes() {
     echo "$count"
 }
 
+has_any_session() {
+    # tmux sessions alive?
+    tmux list-sessions &>/dev/null && return 0
+    # PTY session files exist?
+    [ -d "$SESSION_DIR" ] && [ -n "$(find "$SESSION_DIR" -name '*.json' -print -quit 2>/dev/null)" ] && return 0
+    return 1
+}
+
 restart_count=0
 
 while true; do
-    if ! tmux list-sessions &>/dev/null; then
-        log "tmux 세션 없음 — 래퍼 종료"
+    if ! has_any_session; then
+        log "세션 없음 (tmux/PTY) — 래퍼 종료"
         exit 0
     fi
 
@@ -98,8 +107,8 @@ while true; do
     end_time=$(date +%s)
     uptime=$((end_time - start_time))
 
-    if ! tmux list-sessions &>/dev/null; then
-        log "tmux 세션 없음 — 래퍼 종료"
+    if ! has_any_session; then
+        log "세션 없음 (tmux/PTY) — 래퍼 종료"
         exit 0
     fi
 
@@ -121,8 +130,8 @@ while true; do
         send_telegram "⚠️ 봇 crash loop (${CB_WINDOW}초 내 ${recent}회). ${RECOVERY_WAIT}초 후 재시도."
         sleep "$RECOVERY_WAIT"
 
-        if ! tmux list-sessions &>/dev/null; then
-            log "복구 대기 후 tmux 없음 — 래퍼 종료"
+        if ! has_any_session; then
+            log "복구 대기 후 세션 없음 — 래퍼 종료"
             exit 0
         fi
         crash_times=()

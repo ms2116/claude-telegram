@@ -25,7 +25,12 @@ import time
 from pathlib import Path
 from typing import BinaryIO
 
+import re
+
 import pyte
+
+# DA (Device Attributes) response: ESC[?...c — filter from PTY output before display
+DA_RE = re.compile(r"\x1b\[\?[0-9;]*c")
 DEFAULT_PORT = 50001
 WSL_SESSION_DIR = "/tmp/claude_sessions"
 # Repo root: pty_wrapper.py → src/claude_telegram/ → src/ → repo
@@ -352,10 +357,12 @@ class PtyWrapper:
                 time.sleep(PTY_READ_INTERVAL)
                 continue
 
-            # Raw output to local terminal (preserve ANSI)
+            # Raw output to local terminal (filter DA response, preserve other ANSI)
             try:
-                sys.stdout.write(text)
-                sys.stdout.flush()
+                display = DA_RE.sub("", text)
+                if display:
+                    sys.stdout.write(display)
+                    sys.stdout.flush()
             except OSError:
                 pass
 

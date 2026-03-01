@@ -62,6 +62,21 @@ def main() -> None:
     # run_polling handles its own event loop, signals, and graceful shutdown
     bot = Bot(settings, claude, store)
     app = bot.build_application()
+
+    # Send startup notification
+    session_names = list(sessions.keys())
+    session_count = len(session_names)
+    startup_msg = f"봇 기동됨 ({session_count}개 세션)\n활성: {', '.join(session_names) or '없음'}"
+
+    async def post_init(application) -> None:
+        for uid in settings.get_allowed_users():
+            try:
+                await application.bot.send_message(chat_id=uid, text=startup_msg)
+            except Exception:
+                log.warning("기동 알림 전송 실패: %s", uid)
+
+    app.post_init = post_init
+
     log.info("Starting polling...")
     app.run_polling(drop_pending_updates=True)
     log.info("Bot stopped.")

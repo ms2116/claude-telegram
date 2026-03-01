@@ -114,24 +114,24 @@ class Bot:
         current = self._get_project(user.id)
         current_name = os.path.basename(current) if current else "none"
         await update.message.reply_text(  # type: ignore[union-attr]
-            f"Claude Code Telegram Bot\n\n"
-            f"Active: {current_name}\n"
-            f"Tmux: {session_list}\n\n"
-            f"/help — Commands",
+            f"Claude Code 텔레그램 봇\n\n"
+            f"현재 프로젝트: {current_name}\n"
+            f"tmux 세션: {session_list}\n\n"
+            f"/help 로 명령어 확인",
         )
 
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not self._is_allowed(update.effective_user.id):
             return
         await update.message.reply_text(  # type: ignore[union-attr]
-            "Messages → active Claude session\n\n"
-            "/project <name> — Switch project\n"
-            "/projects — Show all projects\n"
-            "/session [n] — Pick session to resume\n"
-            "/new — New conversation\n"
-            "/stop — Cancel (Ctrl+C)\n"
-            "/status — Current project info\n"
-            "/refresh — Reload tmux sessions",
+            "메시지를 보내면 현재 프로젝트의 Claude에 전달됩니다\n\n"
+            "/project <이름> — 프로젝트 전환\n"
+            "/projects — 전체 프로젝트 목록\n"
+            "/session [번호] — 이전 세션 선택\n"
+            "/new — 새 대화 시작\n"
+            "/stop — 작업 중단 (Ctrl+C)\n"
+            "/status — 현재 상태 확인\n"
+            "/refresh — tmux 세션 새로고침",
         )
 
     async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -140,13 +140,13 @@ class Bot:
             return
         project = self._get_project(user.id)
         if not project:
-            await update.message.reply_text("No active project.")  # type: ignore[union-attr]
+            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
             return
         interrupted = await self.claude.interrupt_session(user.id, project)
         if interrupted:
-            await update.message.reply_text("Task cancelled.")  # type: ignore[union-attr]
+            await update.message.reply_text("작업을 중단했습니다.")  # type: ignore[union-attr]
         else:
-            await update.message.reply_text("No running task to cancel.")  # type: ignore[union-attr]
+            await update.message.reply_text("실행 중인 작업이 없습니다.")  # type: ignore[union-attr]
 
     async def cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -154,7 +154,7 @@ class Bot:
             return
         project = self._get_project(user.id)
         if not project:
-            await update.message.reply_text("No active project.")  # type: ignore[union-attr]
+            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
             return
 
         # End current store session
@@ -168,14 +168,14 @@ class Bot:
             try:
                 from .claude import send_to_tmux
                 await send_to_tmux(session.info.pane_id, "/new")
-                await update.message.reply_text("Sent /new to Claude session.")  # type: ignore[union-attr]
+                await update.message.reply_text("새 대화를 시작했습니다.")  # type: ignore[union-attr]
             except Exception:
                 log.warning("Failed to send /new", exc_info=True)
-                await update.message.reply_text("Failed to send /new.")  # type: ignore[union-attr]
+                await update.message.reply_text("/new 전송 실패.")  # type: ignore[union-attr]
         else:
             # SDK mode: clear the SDK session so next message starts fresh
             self.claude.clear_sdk_session(project)
-            await update.message.reply_text("Session cleared. Next message will start a new session.")  # type: ignore[union-attr]
+            await update.message.reply_text("세션 초기화 완료. 다음 메시지부터 새 대화입니다.")  # type: ignore[union-attr]
 
     async def cmd_project(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -193,7 +193,7 @@ class Bot:
                         break
                 else:
                     current_name = os.path.basename(current)
-            await update.message.reply_text(f"Current: {current_name}\nUsage: /project <name>")  # type: ignore[union-attr]
+            await update.message.reply_text(f"현재: {current_name}\n사용법: /project <이름>")  # type: ignore[union-attr]
             return
         target = args[1].strip()
         # Match by tmux session name or work_dir
@@ -202,13 +202,13 @@ class Bot:
         for name, info in sessions.items():
             if target.lower() in (name.lower(), os.path.basename(info.work_dir).lower()):
                 self._user_projects[user.id] = info.work_dir or name
-                await update.message.reply_text(f"Switched to: {name} ({info.work_dir})")  # type: ignore[union-attr]
+                await update.message.reply_text(f"{name} (tmux)로 전환했습니다")  # type: ignore[union-attr]
                 return
         # Partial match in tmux sessions
         for name, info in sessions.items():
             if target.lower() in name.lower():
                 self._user_projects[user.id] = info.work_dir or name
-                await update.message.reply_text(f"Switched to: {name} ({info.work_dir})")  # type: ignore[union-attr]
+                await update.message.reply_text(f"{name} (tmux)로 전환했습니다")  # type: ignore[union-attr]
                 return
         # Fallback: match CT_PROJECT_DIRS (SDK mode)
         for d in self.settings.get_project_dirs():
@@ -217,21 +217,21 @@ class Bot:
                 # Show available sessions for selection
                 from .claude import SDKSession
                 found = SDKSession.find_sessions(d, limit=5)
-                lines = [f"Switched to: {os.path.basename(d)} (SDK mode)"]
+                lines = [f"{os.path.basename(d)} (SDK)로 전환했습니다"]
                 if found:
-                    lines.append("\nRecent sessions:")
+                    lines.append("\n최근 세션:")
                     for i, s in enumerate(found):
                         import time as _time
                         ts = _time.strftime("%m/%d %H:%M", _time.localtime(s["mtime"]))
                         marker = " *" if i == 0 else ""
                         lines.append(f"  {i+1}. {s['id'][:8]}... ({ts}, {s['source']}){marker}")
-                    lines.append(f"\nAuto-resuming #{1}. Use /session <n> to pick another.")
+                    lines.append(f"\n1번 세션으로 자동 연결. /session <번호>로 변경 가능")
                 else:
-                    lines.append("No previous sessions. Will start new.")
+                    lines.append("이전 세션 없음. 새 세션으로 시작합니다.")
                 await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
                 return
         available = list(sessions.keys()) + [os.path.basename(d) for d in self.settings.get_project_dirs()]
-        await update.message.reply_text(f"Not found: {target}\nAvailable: {available}")  # type: ignore[union-attr]
+        await update.message.reply_text(f"'{target}' 을(를) 찾을 수 없습니다\n목록: {available}")  # type: ignore[union-attr]
 
     async def cmd_projects(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -258,7 +258,7 @@ class Bot:
                 marker = " *" if name == current_base else ""
                 lines.append(f"  {name}{marker} — {d}")
         if not lines:
-            lines.append("No sessions or projects configured.")
+            lines.append("세션/프로젝트가 없습니다.")
         await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -270,15 +270,15 @@ class Bot:
         running = self.claude.get_active_projects(user.id)
         current = self._get_project(user.id)
 
-        lines = [f"Sessions: {len(sessions)}"]
+        lines = [f"세션: {len(sessions)}개"]
         for name, info in sessions.items():
             is_current = current and (name == os.path.basename(current.rstrip("/")))
             is_running = info.project in running
-            marker = " [active]" if is_current else ""
-            status = " (running)" if is_running else ""
+            marker = " [현재]" if is_current else ""
+            status = " (실행중)" if is_running else ""
             lines.append(f"  {name}{marker}{status} — {info.pane_id}")
         if not sessions:
-            lines.append("  No tmux sessions found")
+            lines.append("  tmux 세션 없음")
         await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
 
     async def cmd_session(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -288,24 +288,24 @@ class Bot:
             return
         project = self._get_project(user.id)
         if not project:
-            await update.message.reply_text("No active project.")  # type: ignore[union-attr]
+            await update.message.reply_text("활성 프로젝트가 없습니다.")  # type: ignore[union-attr]
             return
 
         from .claude import SDKSession
         found = SDKSession.find_sessions(project, limit=5)
         if not found:
-            await update.message.reply_text("No sessions found for this project.")  # type: ignore[union-attr]
+            await update.message.reply_text("이 프로젝트의 세션이 없습니다.")  # type: ignore[union-attr]
             return
 
         args = (update.message.text or "").split(maxsplit=1)  # type: ignore[union-attr]
         if len(args) < 2:
             # Show session list
             import time as _time
-            lines = [f"Sessions for {os.path.basename(project)}:"]
+            lines = [f"{os.path.basename(project)} 세션 목록:"]
             for i, s in enumerate(found):
                 ts = _time.strftime("%m/%d %H:%M", _time.localtime(s["mtime"]))
                 lines.append(f"  {i+1}. {s['id'][:8]}... ({ts}, {s['source']})")
-            lines.append(f"\nUsage: /session <number>")
+            lines.append(f"\n사용법: /session <번호>")
             await update.message.reply_text("\n".join(lines))  # type: ignore[union-attr]
             return
 
@@ -318,12 +318,12 @@ class Bot:
                 sdk = self.claude.get_or_create_sdk_session(project)
                 sdk._sdk_session_id = chosen["id"]
                 await update.message.reply_text(  # type: ignore[union-attr]
-                    f"Session set: {chosen['id'][:8]}... ({chosen['source']})"
+                    f"세션 설정: {chosen['id'][:8]}... ({chosen['source']})"
                 )
             else:
-                await update.message.reply_text(f"Invalid. Choose 1-{len(found)}")  # type: ignore[union-attr]
+                await update.message.reply_text(f"1~{len(found)} 사이 번호를 입력하세요")  # type: ignore[union-attr]
         except ValueError:
-            await update.message.reply_text("Usage: /session <number>")  # type: ignore[union-attr]
+            await update.message.reply_text("사용법: /session <번호>")  # type: ignore[union-attr]
 
     async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -332,7 +332,7 @@ class Bot:
         self.claude.refresh()
         sessions = self.claude.get_all_sessions()
         names = list(sessions.keys())
-        await update.message.reply_text(f"Reloaded: {names or 'no sessions found'}")  # type: ignore[union-attr]
+        await update.message.reply_text(f"새로고침 완료: {names or '세션 없음'}")  # type: ignore[union-attr]
 
     # --- Message Handler ---
 
@@ -344,7 +344,7 @@ class Bot:
 
         project = self._get_project(user.id)
         if not project:
-            await msg.reply_text("No project configured. Set CT_PROJECT_DIRS in .env")
+            await msg.reply_text("프로젝트 미설정. .env에 CT_PROJECT_DIRS를 설정하세요.")
             return
 
         log.info("Message from %s → project %s", user.id, project)
@@ -366,7 +366,7 @@ class Bot:
 
         # Send typing indicator and placeholder message
         await ctx.bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
-        reply = await msg.reply_text("Thinking...")
+        reply = await msg.reply_text("처리중...")
 
         # Stream callback — edit the reply message with accumulated text
         accumulated: list[str] = []
@@ -407,7 +407,7 @@ class Bot:
             # Build final display text
             display_text = result.text.strip() if result.text else ""
             if not display_text and not accumulated:
-                display_text = "(no text response — tools were used)"
+                display_text = "(텍스트 응답 없음 — 도구 실행됨)"
 
             # Send final message
             if display_text:

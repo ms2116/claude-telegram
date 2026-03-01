@@ -17,7 +17,6 @@ import argparse
 import json
 import msvcrt
 import os
-import re
 import socket
 import subprocess
 import sys
@@ -26,24 +25,15 @@ import time
 from pathlib import Path
 from typing import BinaryIO
 
-ANSI_RE = re.compile(
-    r"\x1b\[[\x20-\x3f]*[0-9;]*[\x20-\x7e]"  # CSI sequences (incl. ?2026h etc.)
-    r"|\x1b\][^\x07]*(?:\x07|\x1b\\)"          # OSC sequences (title, etc.)
-    r"|\x1b\([A-Z]"                              # Character set selection
-    r"|\x1b[=>NOM78]"                            # Other ESC sequences
-    r"|[\x00-\x08\x0e-\x1f]"                    # Control chars (except \t \n \r)
-)
+import pyte
 DEFAULT_PORT = 50001
 WSL_SESSION_DIR = "/tmp/claude_sessions"
 # Repo root: pty_wrapper.py → src/claude_telegram/ → src/ → repo
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PTY_COLS = 120
 PTY_ROWS = 30
-PTY_READ_INTERVAL = 0.05  # 50ms polling
-
-
-def strip_ansi(text: str) -> str:
-    return ANSI_RE.sub("", text)
+PTY_READ_INTERVAL = 0.05   # 50ms polling
+SNAPSHOT_INTERVAL = 0.5     # screen snapshot broadcast interval
 
 
 def _detect_bot_distro() -> str | None:
@@ -150,6 +140,11 @@ class PtyWrapper:
         self._running = True
         self._pty = None
         self._registered = False
+        # pyte virtual terminal for screen snapshots
+        self._screen = pyte.Screen(PTY_COLS, PTY_ROWS)
+        self._stream = pyte.Stream(self._screen)
+        self._screen_lock = threading.Lock()
+        self._last_snapshot = ""
 
     def start(self):
         from winpty import PTY  # type: ignore[import-untyped]
@@ -164,6 +159,7 @@ class PtyWrapper:
         threads = [
             threading.Thread(target=self._stdin_thread, daemon=True),
             threading.Thread(target=self._pty_read_thread, daemon=True),
+            threading.Thread(target=self._snapshot_thread, daemon=True),
             threading.Thread(target=self._tcp_server_thread, daemon=True),
         ]
         for t in threads:
@@ -327,15 +323,14 @@ class PtyWrapper:
         except (OSError, EOFError):
             pass
 
-    # ── PTY → stdout + TCP broadcast ──
+    # ── PTY → stdout + pyte screen ──
 
     def _pty_read_thread(self):
-        """Poll PTY output, write to stdout and broadcast to TCP clients."""
+        """Poll PTY output, write to stdout and feed into pyte virtual terminal."""
         while self._running:
             if not self._pty or not self._pty.isalive():
                 break
             try:
-                # pywinpty 3.x: read() returns str
                 text: str = self._pty.read()
             except (OSError, EOFError):
                 break
@@ -350,12 +345,32 @@ class PtyWrapper:
             except OSError:
                 pass
 
-            # ANSI-stripped output to TCP clients
-            clean = strip_ansi(text)
-            if clean:
-                self._broadcast({"type": "output", "data": clean})
+            # Feed into pyte virtual terminal
+            with self._screen_lock:
+                self._stream.feed(text)
 
             time.sleep(PTY_READ_INTERVAL)
+
+    # ── Screen snapshot → TCP broadcast ──
+
+    def _snapshot_thread(self):
+        """Periodically capture pyte screen and broadcast to TCP clients."""
+        while self._running:
+            time.sleep(SNAPSHOT_INTERVAL)
+
+            with self._screen_lock:
+                lines = []
+                for row in range(self._screen.lines):
+                    line = self._screen.buffer[row]
+                    chars = []
+                    for col in range(self._screen.columns):
+                        chars.append(line[col].data)
+                    lines.append("".join(chars).rstrip())
+                snapshot = "\n".join(lines).rstrip()
+
+            if snapshot != self._last_snapshot:
+                self._last_snapshot = snapshot
+                self._broadcast({"type": "output", "data": snapshot})
 
     def _broadcast(self, obj: dict):
         with self._clients_lock:
@@ -413,7 +428,14 @@ class PtyWrapper:
             if msg_type == "input":
                 data = msg.get("data", "")
                 if data and self._pty and self._pty.isalive():
-                    self._pty.write(data)
+                    # Split text and Enter (\r) to give TUI time to process
+                    if len(data) > 1 and data.endswith(("\r", "\n")):
+                        text = data.rstrip("\r\n")
+                        self._pty.write(text)
+                        time.sleep(0.1)
+                        self._pty.write("\r")
+                    else:
+                        self._pty.write(data)
         client.close()
         with self._clients_lock:
             if client in self._clients:

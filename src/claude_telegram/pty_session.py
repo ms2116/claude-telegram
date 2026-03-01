@@ -86,12 +86,8 @@ class WindowsPtySession:
                 data = msg.get("data", "")
                 if data:
                     async with self._buf_lock:
-                        # Append new lines to buffer
-                        new_lines = data.split("\n")
-                        self._pane_buffer.extend(new_lines)
-                        # Trim to max
-                        if len(self._pane_buffer) > MAX_BUFFER_LINES:
-                            self._pane_buffer = self._pane_buffer[-MAX_BUFFER_LINES:]
+                        # Replace buffer with screen snapshot (not append)
+                        self._pane_buffer = data.split("\n")
             elif msg.get("type") == "status":
                 if not msg.get("alive"):
                     break

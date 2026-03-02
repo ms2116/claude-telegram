@@ -29,15 +29,15 @@ import re
 
 import pyte
 
-# DA (Device Attributes) response filter — both ANSI and plain text forms
-DA_RE = re.compile(r"\x1b\[\?[0-9;]*c|\?[0-9;]{10,}c")
+# DA (Device Attributes) filter — queries (ESC[c, ESC[>c) and responses (ESC[?...c, bare ?...c)
+DA_RE = re.compile(r"\x1b\[>?[0-9]*c|\x1b\[\?[0-9;]*c|\?[0-9;]+c")
 DEFAULT_PORT = 50001
 WSL_SESSION_DIR = "/tmp/claude_sessions"
 # Repo root: pty_wrapper.py → src/claude_telegram/ → src/ → repo
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PTY_COLS = 120
 PTY_ROWS = 30
-PTY_READ_INTERVAL = 0.05   # 50ms polling
+PTY_READ_INTERVAL = 0.01   # 10ms polling
 SNAPSHOT_INTERVAL = 0.5     # screen snapshot broadcast interval
 
 
@@ -178,7 +178,6 @@ class PtyWrapper:
         threads = [
             threading.Thread(target=self._stdin_thread, daemon=True),
             threading.Thread(target=self._pty_read_thread, daemon=True),
-            threading.Thread(target=self._display_thread, daemon=True),
             threading.Thread(target=self._snapshot_thread, daemon=True),
             threading.Thread(target=self._tcp_server_thread, daemon=True),
         ]
@@ -346,7 +345,7 @@ class PtyWrapper:
     # ── PTY → stdout + pyte screen ──
 
     def _pty_read_thread(self):
-        """Poll PTY output and feed into pyte virtual terminal."""
+        """Poll PTY output → raw passthrough to stdout (colors preserved) + pyte feed (TCP snapshots)."""
         while self._running:
             if not self._pty or not self._pty.isalive():
                 break
@@ -356,47 +355,20 @@ class PtyWrapper:
                 break
 
             if text:
+                # Raw ANSI passthrough to local terminal (preserves colors)
+                # Filter DA (Device Attributes) responses that corrupt display
+                display_text = DA_RE.sub("", text)
+                try:
+                    if display_text:
+                        sys.stdout.write(display_text)
+                        sys.stdout.flush()
+                except OSError:
+                    pass
+                # Feed pyte for TCP snapshot (plain text for telegram)
                 with self._screen_lock:
                     self._stream.feed(text)
             else:
                 time.sleep(PTY_READ_INTERVAL)
-
-    def _display_thread(self):
-        """Render pyte screen to local terminal periodically."""
-        RENDER_INTERVAL = 0.1  # 100ms refresh rate
-        last_render = ""
-
-        while self._running:
-            time.sleep(RENDER_INTERVAL)
-
-            with self._screen_lock:
-                lines = []
-                for row in range(self._screen.lines):
-                    line = self._screen.buffer[row]
-                    chars = []
-                    for col in range(self._screen.columns):
-                        chars.append(line[col].data)
-                    lines.append("".join(chars).rstrip())
-                # Include cursor position
-                cursor_row = self._screen.cursor.y
-                cursor_col = self._screen.cursor.x
-                render = "\n".join(lines)
-
-            if render == last_render:
-                continue
-            last_render = render
-
-            # Clear screen and redraw from pyte buffer
-            try:
-                sys.stdout.write("\x1b[H")  # Move cursor to top-left
-                for i, line in enumerate(lines):
-                    clean = DA_RE.sub("", line)
-                    sys.stdout.write(f"\x1b[{i+1};1H\x1b[2K{clean}")
-                # Position cursor where pyte says it should be
-                sys.stdout.write(f"\x1b[{cursor_row+1};{cursor_col+1}H")
-                sys.stdout.flush()
-            except OSError:
-                pass
 
     # ── Screen snapshot → TCP broadcast ──
 

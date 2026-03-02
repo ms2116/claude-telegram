@@ -10,11 +10,11 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "claude-agent-sdk>=0.1.44",
     "pyte>=0.8.2",
+    "pywinpty>=3.0; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]
 sdk = ["claude-agent-sdk>=0.1.39"]
-windows = ["pywinpty>=3.0"]
 
 [project.scripts]
 claude-telegram = "claude_telegram.main:main"

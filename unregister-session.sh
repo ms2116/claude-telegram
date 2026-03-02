@@ -22,6 +22,6 @@ echo "세션 해제: $PROJECT"
 remaining=$(find "$SESSION_DIR" -name '*.json' 2>/dev/null | wc -l)
 if [ "$remaining" -eq 0 ]; then
     echo "마지막 세션 해제 — 봇 종료"
-    pkill -f 'claude-telegram' 2>/dev/null || true
+    pkill -f 'uv run claude-telegram' 2>/dev/null || true
     rm -f /tmp/claude_telegram_bot.pid
 fi

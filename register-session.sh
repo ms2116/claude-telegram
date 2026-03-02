@@ -45,7 +45,7 @@ if [ -f "$LOCK_FILE" ]; then
         bot_running=true
     fi
 fi
-if [ "$bot_running" = false ] && pgrep -f 'claude-telegram' > /dev/null 2>&1; then
+if [ "$bot_running" = false ] && pgrep -f 'uv run claude-telegram' > /dev/null 2>&1; then
     bot_running=true
 fi
 

@@ -27,6 +27,10 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set +a
 fi
 
+# uv PATH (non-interactive shell에서 hook으로 실행될 때 필요)
+# shellcheck disable=SC1091
+[ -f "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"
+
 # ── 단일 인스턴스 보장 (PID 락) ──
 if [ -f "$LOCK_FILE" ]; then
     old_pid=$(cat "$LOCK_FILE" 2>/dev/null)
@@ -38,7 +42,7 @@ if [ -f "$LOCK_FILE" ]; then
 fi
 
 # 기존 봇 프로세스 정리
-pkill -f 'claude-telegram' 2>/dev/null || true
+pkill -f 'uv run claude-telegram' 2>/dev/null || true
 sleep 1
 
 echo $$ > "$LOCK_FILE"
